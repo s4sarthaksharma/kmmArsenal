@@ -1,0 +1,41 @@
+# Kotlin metadata cache
+.kotlin/
+
+# Gradle
+.gradle/
+build/
+**/build/
+local.properties
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Kotlin
+*.class
+*.kotlin_module
+
+# Android
+*.apk
+*.aab
+*.ap_
+*.dex
+captures/
+
+# iOS / Xcode
+iosApp/*.xcworkspace
+iosApp/Pods/
+iosApp/.DS_Store
+iosApp/iosApp.xcodeproj/xcuserdata/
+iosApp/iosApp.xcodeproj/project.xcworkspace/
+*.xcuserstate
+DerivedData/
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Gradle wrapper jar (binary, should be generated via `gradle wrapper`)
+gradle/wrapper/gradle-wrapper.jar

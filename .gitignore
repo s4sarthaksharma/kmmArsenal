@@ -1,0 +1,6 @@
+# IntelliJ / Android Studio
+.idea/
+
+# macOS
+.DS_Store
+**/.DS_Store
