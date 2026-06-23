@@ -1,0 +1,9 @@
+{
+  "platforms": ["apple", "android"],
+  "apple": {
+    "modules": ["KmpBridgeModule"]
+  },
+  "android": {
+    "modules": ["expo.modules.kmpbridge.KmpBridgeModule"]
+  }
+}

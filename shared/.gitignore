@@ -1,0 +1,9 @@
+# KMP / Gradle build outputs
+build/
+.gradle/
+.kotlin/
+local.properties
+
+# IDE
+.idea/
+*.iml

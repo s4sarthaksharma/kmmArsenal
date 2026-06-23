@@ -1,0 +1,170 @@
+# KMP ↔ React Native Bridge — Implementation Plan
+
+**Goal:** An Expo / React Native app that calls native-level functionality implemented in a
+**Kotlin Multiplatform (KMP)** shared module, exposed to JavaScript through an Expo native
+module bridge — write the logic once in Kotlin, call it from React on both iOS and Android.
+
+> **Constraint:** Custom native code means **no Expo Go** — a *development build* is required
+> (`expo prebuild` + run on simulator/device).
+
+---
+
+## Architecture (4 layers)
+
+```
+┌─────────────────────────────────────────────┐
+│  React / TS app  (src/app/*.tsx)             │  ← calls clean TS functions/hooks
+├─────────────────────────────────────────────┤
+│  TS wrapper      (modules/<name>/index.ts)   │  ← typed API surface
+├─────────────────────────────────────────────┤
+│  Expo Native Module  (Kotlin + Swift)        │  ← the bridge to JS
+│   Android: Kotlin   │   iOS: Swift           │
+├──────────────────────┼──────────────────────┤
+│  KMP shared module                           │
+│   androidMain → AAR  │  iosMain → XCFramework │
+│            commonMain (shared logic)         │
+└─────────────────────────────────────────────┘
+```
+
+The Expo Modules API is itself Kotlin (Android) + Swift (iOS), which pairs perfectly with KMP:
+Android consumes the KMP module as a normal Gradle dependency, and Swift consumes the
+Kotlin/Native-generated framework. The Expo module is the thin "bridge" that turns KMP calls
+into JS-callable functions / async-functions / events.
+
+---
+
+## Toolchain version pins
+
+| Component | Version | Notes |
+|---|---|---|
+| Expo SDK | 56 | Read versioned docs at https://docs.expo.dev/versions/v56.0.0/ before writing Expo code (per `AGENTS.md`) |
+| React Native | 0.85.x | New architecture by default |
+| Kotlin | **2.1.20** | App + KMP module match (from RN's `gradle/libs.versions.toml`) |
+| AGP | **8.12.0** | Requires Gradle ≥ 8.13 |
+| Gradle (app) | **9.3.1** | Expo-generated wrapper |
+| Gradle (`shared/`) | **8.13** | Kotlin 2.1.20 KGP can't run under Gradle 9.x; AGP 8.12 needs ≥ 8.13 |
+
+> Expo allows overriding `android.kotlinVersion` up to **2.2.21** (errors at ≥ 2.3.0) if a
+> newer Kotlin is ever needed.
+
+---
+
+## Phased plan
+
+### Phase 0 — Dev-build foundation ✅ DONE
+- [x] Install `expo-dev-client`
+- [x] `npx expo prebuild --clean` → generate `android/` and `ios/`
+- [x] Capture app toolchain pins (Kotlin / AGP / Gradle)
+- [x] Note: `/ios` and `/android` are **gitignored** → CNG project → native wiring must go
+      through an **Expo config plugin** (hand-edits get wiped by prebuild)
+
+### Phase 1 — KMP `shared/` module ✅ DONE
+- [x] Standalone, independently-buildable KMP module under `shared/`
+- [x] `commonMain` shared logic: `Greeting().greet(name)` + `expect class Platform`
+- [x] `androidMain` / `iosMain` `actual` implementations
+- [x] Verified **Android** build → `shared-release.aar` (`./gradlew assembleRelease`)
+- [x] Verified **iOS** build → `Shared.xcframework` (`./gradlew assembleSharedReleaseXCFramework`)
+
+```
+shared/
+├── build.gradle.kts          # kotlin("multiplatform") 2.1.20 + AGP 8.12.0, XCFramework "Shared"
+├── settings.gradle.kts
+├── gradle/ (wrapper → Gradle 8.13)
+└── src/
+    ├── commonMain/.../Greeting.kt        # greet(name) — the shared logic
+    ├── commonMain/.../Platform.kt        # expect class Platform
+    ├── androidMain/.../Platform.android.kt
+    └── iosMain/.../Platform.ios.kt
+```
+
+### Phase 2 — Scaffold the Expo native module ✅ DONE
+- [x] `npx create-expo-module@latest --local kmp-bridge` → `modules/kmp-bridge/`
+      (name `KmpBridge`, package `expo.modules.kmpbridge`, platforms apple + android)
+- [x] Confirmed autolinking discovers the module on both Android & Apple
+      (`npx expo-modules-autolinking search -p android|apple`)
+- [ ] Full dev-build verification deferred to Phase 5 (build once there's an end-to-end call to see)
+
+```
+modules/kmp-bridge/
+├── expo-module.config.json
+├── android/src/main/java/expo/modules/kmpbridge/KmpBridgeModule.kt   # ← Phase 3 edits here
+├── ios/KmpBridge.podspec                                            # ← Phase 4 edits here
+├── ios/KmpBridgeModule.swift                                        # ← Phase 4 edits here
+└── src/
+    ├── KmpBridgeModule.ts        # JS API surface  ← Phase 5
+    ├── KmpBridge.types.ts
+    └── KmpBridgeModule.web.ts    # web fallback stub
+```
+
+Generated boilerplate exposes `hello(): string` and `setValueAsync(value): Promise<void>` —
+these are placeholders we'll replace with calls into the KMP `Greeting`.
+
+### Phase 3 — Wire KMP → Android ✅ DONE
+- [x] Publish KMP AAR to **mavenLocal** (`cd shared && ./gradlew publishToMavenLocal`) — publishes
+      `com.example.shared:shared:1.0.0` with Gradle Module Metadata (auto-selects `shared-android` variant)
+- [x] Add `mavenLocal()` + `implementation 'com.example.shared:shared:1.0.0'` to
+      `modules/kmp-bridge/android/build.gradle` — **no config plugin needed**: the module dir is
+      committed source, not regenerated by prebuild
+- [x] `KmpBridgeModule.kt` imports `com.example.shared.Greeting` and exposes `greet` / `greetAsync`
+- [x] **Verified** emulator-free: `cd android && ./gradlew :kmp-bridge:assembleDebug` compiles the
+      bridge Kotlin against the KMP API and bundles the AAR — proves the cross-Gradle-version boundary
+      (shared @ 8.13 → app @ 9.3.1) is bridged by the published artifact
+
+> ⚠️ **Prerequisite for any Android build:** run `cd shared && ./gradlew publishToMavenLocal` first
+> (and re-run it whenever the KMP module changes), otherwise the dependency won't resolve.
+
+### Phase 4 — Wire KMP → iOS ✅ DONE
+- [x] Copy `Shared.xcframework` into `modules/kmp-bridge/ios/Frameworks/` (gitignored build output)
+- [x] `KmpBridge.podspec`: `s.vendored_frameworks = 'Frameworks/Shared.xcframework'`
+      (+ scoped `source_files` to `*.{...}` so the framework headers aren't double-compiled)
+- [x] `KmpBridgeModule.swift`: `import Shared`; calls `Greeting().greet(name:)`
+      (ObjC `SharedGreeting` → Swift `Greeting` via `swift_name`)
+- [x] **No config plugin needed** — the framework lives in the *module's* dir, not the app's
+      regenerated `ios/`, so prebuild leaves it intact (same pattern as Android)
+- [x] **Verified**: `npx pod-install` integrates the `KmpBridge` pod with the vendored framework
+      (path resolved in `Pods.xcodeproj`); framework ships a `module.modulemap` so `import Shared` resolves
+- [ ] Full Swift compile + runtime → Phase 5 dev build
+
+> ⚠️ **Prerequisite, both platforms:** run `./scripts/sync-kmp.sh` (publishes AAR to mavenLocal +
+> rebuilds & copies the XCFramework) after any `shared/` change and before building the apps.
+
+### Phase 5 — JS API + React usage ✅ DONE
+- [x] Typed JS surface: `modules/kmp-bridge/src/KmpBridgeModule.ts` (`greet` / `greetAsync`),
+      barrel `modules/kmp-bridge/index.ts`, web JS fallback in `KmpBridgeModule.web.ts`
+- [x] `src/app/index.tsx` calls `greet()` + `greetAsync()` and renders the result
+- [x] Config plugin `plugins/withKmpMavenLocal.js` adds `mavenLocal()` to the regenerated
+      Android root `build.gradle` (needed for transitive resolution of the KMP dep by `:app`)
+- [x] **Verified on a real Android emulator** → "…from Android API 30 (Kotlin Multiplatform)"
+- [x] **Verified on a real iOS simulator** → "…from iOS 18.6 (Kotlin Multiplatform)"
+- [x] Same JS + same KMP `Greeting().greet()` → platform-specific output via `expect`/`actual`
+
+## ✅ Project complete — all phases done
+The full chain works on both platforms:
+**React (`index.tsx`) → TS (`index.ts`) → Expo module (Kotlin/Swift) → KMP `shared` → back to JS.**
+
+---
+
+## Open decisions
+
+1. **KMP location** — in-repo `shared/` (chosen) vs. separately published artifact.
+2. **Native dirs** — config-plugin injection (chosen, required by CNG) vs. committing `android/`/`ios/`.
+3. **iOS integration** — manual XCFramework via podspec (leaning this way) vs. Kotlin CocoaPods plugin.
+
+---
+
+## Useful commands
+
+```bash
+# Regenerate native projects (after config-plugin / app.json changes)
+npx expo prebuild --clean
+
+# Build the KMP artifacts
+cd shared
+./gradlew assembleRelease                      # Android AAR
+./gradlew assembleSharedReleaseXCFramework     # iOS XCFramework
+./gradlew publishToMavenLocal                  # (Phase 3) publish AAR for the app to consume
+
+# Run the app as a dev build
+npx expo run:android
+npx expo run:ios
+```
