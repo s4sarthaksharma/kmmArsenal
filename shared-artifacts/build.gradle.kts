@@ -6,11 +6,13 @@ plugins {
     id("com.android.library")
 }
 
-group = "com.example.shared.artifacts"
-version = "1.0.0"
+val kmpGroup         = (project.findProperty("kmpGroup")         as String?) ?: "com.example.shared"
+val kmpArtifact      = (project.findProperty("kmpArtifact")      as String?) ?: "shared"
+val kmpVersion       = (project.findProperty("kmpVersion")       as String?) ?: "1.0.0"
+val kmpFrameworkName = (project.findProperty("kmpFrameworkName") as String?) ?: "Shared"
 
-val sharedVersion = "1.0.0"
-val sharedGroup = "com.example.shared"
+group   = "com.example.shared.artifacts"
+version = kmpVersion
 
 kotlin {
     androidTarget {
@@ -23,23 +25,23 @@ kotlin {
         }
     }
 
-    val xcframework = XCFramework("Shared")
+    val xcframework = XCFramework(kmpFrameworkName)
     listOf(
         iosX64(),
         iosArm64(),
         iosSimulatorArm64(),
     ).forEach { iosTarget ->
         iosTarget.binaries.framework {
-            baseName = "Shared"
+            baseName = kmpFrameworkName
             isStatic = true
             xcframework.add(this)
-            export("$sharedGroup:shared:$sharedVersion")
+            export("$kmpGroup:$kmpArtifact:$kmpVersion")
         }
     }
 
     sourceSets {
         commonMain.dependencies {
-            api("$sharedGroup:shared:$sharedVersion")
+            api("$kmpGroup:$kmpArtifact:$kmpVersion")
         }
     }
 }
@@ -49,13 +51,13 @@ val sharedAar by configurations.creating {
 }
 
 dependencies {
-    sharedAar("$sharedGroup:shared-android:$sharedVersion@aar")
+    sharedAar("$kmpGroup:$kmpArtifact-android:$kmpVersion@aar")
 }
 
 val resolveAndroidAar by tasks.registering(Copy::class) {
     from(sharedAar)
     into(layout.buildDirectory.dir("outputs/android"))
-    rename { "shared.aar" }
+    rename { "$kmpArtifact.aar" }
 }
 
 android {

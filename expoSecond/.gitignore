@@ -1,0 +1,56 @@
+# Learn more https://docs.github.com/en/get-started/getting-started-with-git/ignoring-files
+
+# dependencies
+node_modules/
+
+# Expo
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+
+# Native
+.kotlin/
+*.orig.*
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+
+# Metro
+.metro-health-check*
+
+# debug
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+
+# yalc (local package linking)
+.yalc/
+yalc.lock
+
+# macOS
+.DS_Store
+*.pem
+
+# IDE (Android Studio / IntelliJ)
+.idea/
+*.iml
+
+# local env files
+.env*.local
+
+# typescript
+*.tsbuildinfo
+
+# Expo starter template moved here by reset-project (anchored to repo root
+# so it doesn't match Kotlin package dirs like com/example/...)
+/example/
+
+# generated native folders
+/ios
+/android
+
+# KMP bridge iOS frameworks (build output, synced by kmp-bridge scripts)
+modules/kmp-bridge/ios/Frameworks/
