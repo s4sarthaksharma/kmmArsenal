@@ -18,6 +18,7 @@ pluginManagement {
 
 dependencyResolutionManagement {
     repositories {
+        mavenLocal()
         google {
             content {
                 includeGroupByRegex("com\\.android.*")
@@ -29,4 +30,4 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "shared"
+rootProject.name = "shared-artifacts"

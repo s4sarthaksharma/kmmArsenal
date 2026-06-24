@@ -1,0 +1,25 @@
+{
+  "name": "kmp-bridge",
+  "version": "0.1.0",
+  "description": "Expo native module bridging the KMP shared module to React Native",
+  "main": "index.ts",
+  "files": [
+    "src",
+    "index.ts",
+    "android",
+    "ios",
+    "expo-module.config.json"
+  ],
+  "scripts": {
+    "prepublishOnly": "bash scripts/sync-kmp-ios.sh",
+    "publish:local": "yalc publish",
+    "push:local": "bash scripts/sync-kmp-android.sh && bash scripts/sync-kmp-ios.sh && yalc push",
+    "build:android": "bash scripts/sync-kmp-android.sh",
+    "build:ios": "bash scripts/sync-kmp-ios.sh",
+    "build": "bash scripts/sync-kmp.sh"
+  },
+  "peerDependencies": {
+    "expo": "*",
+    "react-native": "*"
+  }
+}

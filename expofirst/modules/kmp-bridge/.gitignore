@@ -1,7 +1,0 @@
-# KMP XCFramework copied in by scripts/sync-kmp.sh (build output, not source)
-ios/Frameworks/
-
-# Android native build outputs
-android/build/
-android/.gradle/
-android/.cxx/

@@ -26,6 +26,10 @@ npm-debug.*
 yarn-debug.*
 yarn-error.*
 
+# yalc (local package linking)
+.yalc/
+yalc.lock
+
 # macOS
 .DS_Store
 *.pem
@@ -48,5 +52,5 @@ yarn-error.*
 /ios
 /android
 
-# Note: build outputs for the KMP module and the local Expo module are ignored
-# by their own .gitignore files (shared/.gitignore, modules/kmp-bridge/.gitignore).
+# KMP bridge iOS frameworks (build output, synced by kmp-bridge scripts)
+modules/kmp-bridge/ios/Frameworks/

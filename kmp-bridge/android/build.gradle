@@ -8,15 +8,12 @@ group = 'expo.modules.kmpbridge'
 version = '0.1.0'
 
 repositories {
-  mavenLocal()  // resolves the KMP `shared` module published via `./gradlew publishToMavenLocal`
   mavenCentral()
   google()
 }
 
 dependencies {
-  // KMP shared module (commonMain + androidMain), consumed as a normal AAR.
-  // Gradle Module Metadata selects the `shared-android` variant automatically.
-  implementation 'com.example.shared:shared:1.0.0'
+  implementation fileTree(dir: 'libs', include: ['*.aar'])
 }
 
 android {

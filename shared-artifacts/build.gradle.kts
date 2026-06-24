@@ -4,17 +4,15 @@ import org.jetbrains.kotlin.gradle.plugin.mpp.apple.XCFramework
 plugins {
     kotlin("multiplatform")
     id("com.android.library")
-    `maven-publish`
 }
 
-group = "com.example.shared"
+group = "com.example.shared.artifacts"
 version = "1.0.0"
 
-kotlin {
-    compilerOptions {
-        freeCompilerArgs.add("-Xexpect-actual-classes")
-    }
+val sharedVersion = "1.0.0"
+val sharedGroup = "com.example.shared"
 
+kotlin {
     androidTarget {
         compilations.all {
             compileTaskProvider.configure {
@@ -23,7 +21,6 @@ kotlin {
                 }
             }
         }
-        publishLibraryVariants("release")
     }
 
     val xcframework = XCFramework("Shared")
@@ -36,18 +33,33 @@ kotlin {
             baseName = "Shared"
             isStatic = true
             xcframework.add(this)
+            export("$sharedGroup:shared:$sharedVersion")
         }
     }
 
     sourceSets {
         commonMain.dependencies {
-            // shared logic dependencies go here
+            api("$sharedGroup:shared:$sharedVersion")
         }
     }
 }
 
+val sharedAar by configurations.creating {
+    isTransitive = false
+}
+
+dependencies {
+    sharedAar("$sharedGroup:shared-android:$sharedVersion@aar")
+}
+
+val resolveAndroidAar by tasks.registering(Copy::class) {
+    from(sharedAar)
+    into(layout.buildDirectory.dir("outputs/android"))
+    rename { "shared.aar" }
+}
+
 android {
-    namespace = "com.example.shared"
+    namespace = "com.example.shared.artifacts"
     compileSdk = 35
     defaultConfig {
         minSdk = 24

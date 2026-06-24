@@ -1,0 +1,18 @@
+# KMP build outputs copied in by sync scripts (build output, not source)
+ios/Frameworks/
+android/libs/
+
+# Android native build outputs
+android/build/
+android/.gradle/
+android/.cxx/
+
+# JS / Node
+node_modules/
+
+# IDE
+.idea/
+*.iml
+
+# macOS
+.DS_Store

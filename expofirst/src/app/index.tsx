@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Text, View, StyleSheet, Platform } from "react-native";
-import { greet, greetAsync } from "../../modules/kmp-bridge";
+import { greet, greetAsync } from "kmp-bridge";
 
 export default function Index() {
   const [sync, setSync] = useState<string>("…");
