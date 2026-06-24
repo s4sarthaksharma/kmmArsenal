@@ -14,6 +14,7 @@ pluginManagement {
 
 dependencyResolutionManagement {
     repositories {
+        mavenLocal()
         google {
             content {
                 includeGroupByRegex("com\\.android.*")
@@ -28,5 +29,3 @@ dependencyResolutionManagement {
 rootProject.name = "cmpfirst"
 
 include(":composeApp")
-include(":shared")
-project(":shared").projectDir = File("../shared")
