@@ -1,9 +1,9 @@
 package com.example.shared
 
-/**
- * The shared business logic that both Android and iOS call into through the
- * native bridge. Anything written here runs identically on both platforms.
- */
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
+
 class Greeting {
     private val platform = Platform()
 
@@ -13,5 +13,18 @@ class Greeting {
 
     fun greeting2(): String {
         return "hello from greeting2"
+    }
+
+    fun counterFlow(): Flow<Int> = flow {
+        var count = 0
+        while (true) {
+            emit(count++)
+            delay(1000)
+        }
+    }
+
+    suspend fun delayedEcho(text: String, delayMs: Long): String {
+        delay(delayMs)
+        return text
     }
 }
