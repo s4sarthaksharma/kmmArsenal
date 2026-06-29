@@ -1,3 +1,4 @@
+import bridgegen.GenerateBridgeTask
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.plugin.mpp.apple.XCFramework
 
@@ -11,6 +12,8 @@ val kmpGroup         = (project.findProperty("kmpGroup")         as String?) ?: 
 val kmpArtifact      = (project.findProperty("kmpArtifact")      as String?) ?: "shared"
 val kmpVersion       = (project.findProperty("kmpVersion")       as String?) ?: "1.0.0"
 val kmpFrameworkName = (project.findProperty("kmpFrameworkName") as String?) ?: "Shared"
+val kmpSourceDir     = "../$kmpArtifact/src/commonMain"
+val kmpModuleName    = (project.findProperty("kmpModuleName")    as String?) ?: "KmpBridge"
 
 group   = "com.example.shared.artifacts"
 version = kmpVersion
@@ -59,6 +62,14 @@ val resolveAndroidAar by tasks.registering(Copy::class) {
     from(sharedAar)
     into(layout.buildDirectory.dir("outputs/android"))
     rename { "$kmpArtifact.aar" }
+}
+
+val generateBridgeCode by tasks.registering(GenerateBridgeTask::class) {
+    sourceDir.set(file(kmpSourceDir))
+    outputDir.set(layout.buildDirectory.dir("generated/bridge"))
+    frameworkName.set(kmpFrameworkName)
+    kmpPackageName.set(kmpGroup)
+    moduleName.set(kmpModuleName)
 }
 
 android {

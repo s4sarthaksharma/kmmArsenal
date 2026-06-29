@@ -4,12 +4,13 @@
 import ExpoModulesCore
 import Shared
 
-public class KmpBridgeModule: Module {
+public class GreetingModule: Module {
   private let greeting = Greeting()
-  private var flowTasks: [String: Task<Void, Never>] = [:]
+  private enum FlowKey { case counter }
+  private var flowTasks: [FlowKey: Task<Void, Never>] = [:]
 
   public func definition() -> ModuleDefinition {
-    Name("KmpBridge")
+    Name("Greeting")
 
     Events("onCounterUpdate")
 
@@ -29,13 +30,14 @@ public class KmpBridgeModule: Module {
       return self.greeting.greeting3()
     }
 
+    // hello this o=is greeting4
     Function("greeting4") {
       return self.greeting.greeting4()
     }
 
     Function("startCounter") {
-      self.flowTasks["counter"]?.cancel()
-      self.flowTasks["counter"] = Task { [weak self] in
+      self.flowTasks[.counter]?.cancel()
+      self.flowTasks[.counter] = Task { [weak self] in
         guard let self else { return }
         for await value in self.greeting.counterFlow() {
           self.sendEvent("onCounterUpdate", ["value": value.intValue])
@@ -44,8 +46,8 @@ public class KmpBridgeModule: Module {
     }
 
     Function("stopCounter") {
-      self.flowTasks["counter"]?.cancel()
-      self.flowTasks["counter"] = nil
+      self.flowTasks[.counter]?.cancel()
+      self.flowTasks[.counter] = nil
     }
 
     AsyncFunction("delayedEcho") { (text: String, delayMs: Double, promise: Promise) in

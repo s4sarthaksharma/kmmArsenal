@@ -1,10 +1,21 @@
 {
   "platforms": ["apple", "android"],
   "apple": {
-    "modules": ["KmpBridgeModule"]
+    "modules": [
+      "CalculatorModule",
+      "TrafficLightModule",
+      "AsyncWorkerModule",
+      "TickerServiceModule",
+      "GreetingModule"
+    ]
   },
   "android": {
-    "modules": ["expo.modules.kmpbridge.KmpBridgeModule"]
-  },
-  "plugin": "./app.plugin"
+    "modules": [
+      "expo.modules.kmpbridge.CalculatorModule",
+      "expo.modules.kmpbridge.TrafficLightModule",
+      "expo.modules.kmpbridge.AsyncWorkerModule",
+      "expo.modules.kmpbridge.TickerServiceModule",
+      "expo.modules.kmpbridge.GreetingModule"
+    ]
+  }
 }

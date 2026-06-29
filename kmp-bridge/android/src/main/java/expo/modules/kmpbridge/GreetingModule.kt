@@ -13,13 +13,14 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 
-class KmpBridgeModule : Module() {
+class GreetingModule : Module() {
   private val greeting = Greeting()
   private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
-  private val flowJobs = mutableMapOf<String, Job>()
+  private enum class FlowKey { COUNTER }
+  private val flowJobs = mutableMapOf<FlowKey, Job>()
 
   override fun definition() = ModuleDefinition {
-    Name("KmpBridge")
+    Name("Greeting")
 
     Events("onCounterUpdate")
 
@@ -39,13 +40,14 @@ class KmpBridgeModule : Module() {
       greeting.greeting3()
     }
 
+    // hello this o=is greeting4
     Function("greeting4") {
       greeting.greeting4()
     }
 
     Function("startCounter") {
-      flowJobs["counter"]?.cancel()
-      flowJobs["counter"] = scope.launch {
+      flowJobs[FlowKey.COUNTER]?.cancel()
+      flowJobs[FlowKey.COUNTER] = scope.launch {
         greeting.counterFlow().collect { value ->
           sendEvent("onCounterUpdate", mapOf("value" to value))
         }
@@ -53,8 +55,8 @@ class KmpBridgeModule : Module() {
     }
 
     Function("stopCounter") {
-      flowJobs["counter"]?.cancel()
-      flowJobs.remove("counter")
+      flowJobs[FlowKey.COUNTER]?.cancel()
+      flowJobs.remove(FlowKey.COUNTER)
     }
 
     AsyncFunction("delayedEcho") { text: String, delayMs: Double, promise: Promise ->

@@ -6,3 +6,6 @@ local.properties
 
 # Gradle wrapper jar (binary, regenerated via `gradle wrapper`)
 gradle/wrapper/gradle-wrapper.jar
+
+# Java heap dumps
+*.hprof

@@ -15,6 +15,15 @@ class Greeting {
         return "hello from greeting2"
     }
 
+    fun greeting3(): String {
+        return "new function "
+    }
+
+    //hello this o=is greeting4
+    fun greeting4(): String {
+        return "hello from greeting4"
+    }
+
     fun counterFlow(): Flow<Int> = flow {
         var count = 0
         while (true) {
