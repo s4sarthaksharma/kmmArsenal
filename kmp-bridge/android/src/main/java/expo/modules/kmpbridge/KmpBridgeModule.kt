@@ -1,21 +1,20 @@
 package expo.modules.kmpbridge
 
-import com.example.shared.CounterCallback
-import com.example.shared.CounterWatcher
 import com.example.shared.Greeting
 import expo.modules.kotlin.Promise
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 
 class KmpBridgeModule : Module() {
   private val greeting = Greeting()
-  private val watcher = CounterWatcher(greeting)
   private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+  private var counterJob: Job? = null
 
   override fun definition() = ModuleDefinition {
     Name("KmpBridge")
@@ -23,7 +22,6 @@ class KmpBridgeModule : Module() {
     Events("onCounterUpdate")
 
     OnDestroy {
-      watcher.close()
       scope.cancel()
     }
 
@@ -37,15 +35,17 @@ class KmpBridgeModule : Module() {
     }
 
     Function("startCounter") {
-      watcher.start(object : CounterCallback {
-        override fun onValue(value: Int) {
+      counterJob?.cancel()
+      counterJob = scope.launch {
+        greeting.counterFlow().collect { value ->
           sendEvent("onCounterUpdate", mapOf("value" to value))
         }
-      })
+      }
     }
 
     Function("stopCounter") {
-      watcher.stop()
+      counterJob?.cancel()
+      counterJob = null
     }
 
     AsyncFunction("delayedEcho") { text: String, delayMs: Double, promise: Promise ->

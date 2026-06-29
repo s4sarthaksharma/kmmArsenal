@@ -1,17 +1,9 @@
 import ExpoModulesCore
 import Shared
 
-// Bridges Swift closure into the Kotlin CounterCallback protocol so the
-// Kotlin coroutine can call back into Swift without crossing the async boundary.
-private class SwiftCounterCallback: NSObject, CounterCallback {
-  let handler: (Int32) -> Void
-  init(_ handler: @escaping (Int32) -> Void) { self.handler = handler }
-  func onValue(value: Int32) { handler(value) }
-}
-
 public class KmpBridgeModule: Module {
   private let greeting = Greeting()
-  private lazy var watcher = CounterWatcher(greeting: greeting)
+  private var counterTask: Task<Void, Never>?
 
   public func definition() -> ModuleDefinition {
     Name("KmpBridge")
@@ -19,7 +11,7 @@ public class KmpBridgeModule: Module {
     Events("onCounterUpdate")
 
     OnDestroy {
-      self.watcher.close()
+      self.counterTask?.cancel()
     }
 
     Function("greet") { (name: String) in
@@ -32,13 +24,18 @@ public class KmpBridgeModule: Module {
     }
 
     Function("startCounter") {
-      self.watcher.start(callback: SwiftCounterCallback { [weak self] value in
-        self?.sendEvent("onCounterUpdate", ["value": Int(value)])
-      })
+      self.counterTask?.cancel()
+      self.counterTask = Task { [weak self] in
+        guard let self else { return }
+        for await value in self.greeting.counterFlow() {
+          self.sendEvent("onCounterUpdate", ["value": value.intValue])
+        }
+      }
     }
 
     Function("stopCounter") {
-      self.watcher.stop()
+      self.counterTask?.cancel()
+      self.counterTask = nil
     }
 
     AsyncFunction("delayedEcho") { (text: String, delayMs: Double, promise: Promise) in
