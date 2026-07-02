@@ -6,19 +6,51 @@ object AndroidGenerator {
 
     // ── File-level generation ─────────────────────────────────────────────────
 
-    fun generateFile(sourceFile: KmpSourceFile, module: KmpModule, kmpPackageName: String, androidPackage: String): String {
+    fun generateFile(sourceFile: KmpSourceFile, module: KmpModule, kmpPackageName: String, androidPackage: String, onSkip: (String) -> Unit = {}): String {
         val enumNames      = module.declarations.filterIsInstance<KmpDeclaration.KmpEnum>().map { it.name }.toSet()
         val dataClassNames = module.declarations.filterIsInstance<KmpDeclaration.KmpDataClass>().map { it.name }.toSet()
         val sealedNames    = module.declarations.filterIsInstance<KmpDeclaration.KmpSealedClass>().map { it.name }.toSet()
 
         val records = sourceFile.declarations.filterIsInstance<KmpDeclaration.KmpDataClass>()
-            .filter { it.fields.isNotEmpty() }
+            .filter { dc ->
+                if (dc.fields.isEmpty()) {
+                    onSkip("DATA CLASS SKIPPED: ${dc.name} — no fields, no Record generated.")
+                    false
+                } else true
+            }
         val sealeds = sourceFile.declarations.filterIsInstance<KmpDeclaration.KmpSealedClass>()
         val modules = sourceFile.declarations.filter { decl ->
-            when (decl) {
-                is KmpDeclaration.KmpClass  -> !decl.isAbstract && decl.functions.isNotEmpty()
-                is KmpDeclaration.KmpObject -> decl.functions.isNotEmpty()
-                else                        -> false
+            when {
+                decl is KmpDeclaration.KmpInterface -> {
+                    onSkip("CLASS SKIPPED: ${decl.name} — interfaces are not bridged.")
+                    false
+                }
+                decl is KmpDeclaration.KmpClass && decl.isAbstract -> {
+                    onSkip("CLASS SKIPPED: ${decl.name} — abstract classes are not bridged.")
+                    false
+                }
+                decl is KmpDeclaration.KmpClass && decl.functions.isEmpty() -> {
+                    onSkip("CLASS SKIPPED: ${decl.name} — no functions to bridge.")
+                    false
+                }
+                decl is KmpDeclaration.KmpObject && decl.functions.isEmpty() -> {
+                    onSkip("OBJECT SKIPPED: ${decl.name} — no functions to bridge.")
+                    false
+                }
+                decl is KmpDeclaration.KmpClass  -> true
+                decl is KmpDeclaration.KmpObject -> true
+                else                             -> false
+            }
+        }
+
+        for (dc in records) {
+            for (fn in dc.functions) {
+                onSkip("FUNCTION SKIPPED: ${dc.name}.${fn.name}() — member functions on data classes are not bridged.")
+            }
+        }
+        for (sealed in sealeds) {
+            for (fn in sealed.functions) {
+                onSkip("FUNCTION SKIPPED: ${sealed.name}.${fn.name}() — member functions on sealed classes are not bridged.")
             }
         }
 
@@ -42,7 +74,7 @@ object AndroidGenerator {
         }
 
         for (decl in modules) {
-            val (imports, body) = buildModuleBody(decl, module, kmpPackageName, enumNames, dataClassNames, sealedNames)
+            val (imports, body) = buildModuleBody(decl, module, kmpPackageName, enumNames, dataClassNames, sealedNames, onSkip)
             allImports.addAll(imports)
             moduleBodies.add(body)
         }
@@ -222,6 +254,7 @@ object AndroidGenerator {
         enumNames: Set<String>,
         dataClassNames: Set<String>,
         sealedNames: Set<String>,
+        onSkip: (String) -> Unit = {},
     ): Pair<Set<String>, String> {
         val name      = decl.declName()
         val functions = decl.declFunctions()
@@ -285,8 +318,8 @@ object AndroidGenerator {
         for (fn in functions) {
             sb.appendLine()
             when (fn.kind) {
-                FunctionKind.SYNC    -> sb.append(syncFunction(fn, callTarget, enumNames, dataClassNames, sealedNames))
-                FunctionKind.SUSPEND -> sb.append(suspendFunction(fn, callTarget, enumNames, dataClassNames, sealedNames))
+                FunctionKind.SYNC    -> sb.append(syncFunction(fn, callTarget, enumNames, dataClassNames, sealedNames, onSkip))
+                FunctionKind.SUSPEND -> sb.append(suspendFunction(fn, callTarget, enumNames, dataClassNames, sealedNames, onSkip))
                 FunctionKind.FLOW    -> sb.append(flowFunctions(fn, callTarget, enumNames, dataClassNames, sealedNames))
             }
         }
@@ -305,9 +338,12 @@ object AndroidGenerator {
         enumNames: Set<String>,
         dataClassNames: Set<String> = emptySet(),
         sealedNames: Set<String> = emptySet(),
+        onSkip: (String) -> Unit = {},
     ): String {
         if (fn.params.size > MAX_EXPO_FUNCTION_PARAMS) {
-            return "    // BRIDGE SKIPPED: ${fn.name}(${fn.params.size} params) — Expo Function DSL supports max $MAX_EXPO_FUNCTION_PARAMS parameters.\n"
+            val msg = "BRIDGE SKIPPED: ${fn.name}(${fn.params.size} params) — Expo Function DSL supports max $MAX_EXPO_FUNCTION_PARAMS parameters."
+            onSkip(msg)
+            return "    // $msg\n"
         }
         val sb  = StringBuilder()
         val ret = fn.returnType.toReturnSuffix(enumNames, dataClassNames, sealedNames)
@@ -331,9 +367,12 @@ object AndroidGenerator {
         enumNames: Set<String>,
         dataClassNames: Set<String> = emptySet(),
         sealedNames: Set<String> = emptySet(),
+        onSkip: (String) -> Unit = {},
     ): String {
         if (fn.params.size > MAX_EXPO_FUNCTION_PARAMS) {
-            return "    // BRIDGE SKIPPED: ${fn.name}(${fn.params.size} params) — Expo AsyncFunction DSL supports max $MAX_EXPO_FUNCTION_PARAMS parameters.\n"
+            val msg = "BRIDGE SKIPPED: ${fn.name}(${fn.params.size} params) — Expo AsyncFunction DSL supports max $MAX_EXPO_FUNCTION_PARAMS parameters."
+            onSkip(msg)
+            return "    // $msg\n"
         }
         val sb       = StringBuilder()
         val errorTag = "${fn.name.toSnakeUpperCase()}_ERROR"

@@ -145,6 +145,7 @@ object KlibApiReader {
         all: Map<String, ClassEntry>,
     ): KmpDeclaration? {
         if (Flags.VISIBILITY.get(cls.flags) != ProtoBuf.Visibility.PUBLIC) return null
+        if (Flags.IS_EXPECT_CLASS.get(cls.flags)) return null
 
         val classId  = nr.getClassId(cls.fqName)
         val name     = classId.shortClassName.asString()

@@ -6,14 +6,35 @@ private const val MAX_EXPO_FUNCTION_PARAMS = 8
 
 object TsEnumGenerator {
 
-    fun generate(sourceFile: KmpSourceFile, module: KmpModule): String {
+    fun generate(sourceFile: KmpSourceFile, module: KmpModule, onSkip: (String) -> Unit = {}): String {
         val enums    = sourceFile.declarations.filterIsInstance<KmpDeclaration.KmpEnum>()
         val datas    = sourceFile.declarations.filterIsInstance<KmpDeclaration.KmpDataClass>()
         val sealeds  = sourceFile.declarations.filterIsInstance<KmpDeclaration.KmpSealedClass>()
         val classes  = sourceFile.declarations.filterIsInstance<KmpDeclaration.KmpClass>()
-            .filter { !it.isAbstract && it.functions.isNotEmpty() }
+            .filter { cls ->
+                when {
+                    cls.isAbstract -> { onSkip("CLASS SKIPPED: ${cls.name} — abstract classes are not bridged."); false }
+                    cls.functions.isEmpty() -> { onSkip("CLASS SKIPPED: ${cls.name} — no functions to bridge."); false }
+                    else -> true
+                }
+            }
         val objects  = sourceFile.declarations.filterIsInstance<KmpDeclaration.KmpObject>()
-            .filter { it.functions.isNotEmpty() }
+            .filter { obj ->
+                if (obj.functions.isEmpty()) { onSkip("OBJECT SKIPPED: ${obj.name} — no functions to bridge."); false }
+                else true
+            }
+        sourceFile.declarations.filterIsInstance<KmpDeclaration.KmpInterface>()
+            .forEach { onSkip("CLASS SKIPPED: ${it.name} — interfaces are not bridged.") }
+        for (dc in datas) {
+            for (fn in dc.functions) {
+                onSkip("FUNCTION SKIPPED: ${dc.name}.${fn.name}() — member functions on data classes are not bridged.")
+            }
+        }
+        for (sealed in sealeds) {
+            for (fn in sealed.functions) {
+                onSkip("FUNCTION SKIPPED: ${sealed.name}.${fn.name}() — member functions on sealed classes are not bridged.")
+            }
+        }
 
         val hasBridgeable = classes.isNotEmpty() || objects.isNotEmpty()
         if (enums.isEmpty() && datas.isEmpty() && sealeds.isEmpty() && !hasBridgeable) return ""
@@ -88,7 +109,7 @@ object TsEnumGenerator {
                 appendLine()
                 appendLine("export const ${cls.name} = {")
                 for (fn in cls.functions) {
-                    appendWrapperFunction(fn, cls.name, enumNames, dataNames, sealedNames)
+                    appendWrapperFunction(fn, cls.name, enumNames, dataNames, sealedNames, onSkip)
                 }
                 appendLine("};")
             }
@@ -96,7 +117,7 @@ object TsEnumGenerator {
                 appendLine()
                 appendLine("export const ${obj.name} = {")
                 for (fn in obj.functions) {
-                    appendWrapperFunction(fn, obj.name, enumNames, dataNames, sealedNames)
+                    appendWrapperFunction(fn, obj.name, enumNames, dataNames, sealedNames, onSkip)
                 }
                 appendLine("};")
             }
@@ -109,11 +130,15 @@ object TsEnumGenerator {
         enumNames: Set<String>,
         dataNames: Set<String>,
         sealedNames: Set<String>,
+        onSkip: (String) -> Unit = {},
     ) {
         val native = "_$moduleName"
         when (fn.kind) {
             FunctionKind.SYNC -> {
-                if (fn.params.size > MAX_EXPO_FUNCTION_PARAMS) return
+                if (fn.params.size > MAX_EXPO_FUNCTION_PARAMS) {
+                    onSkip("FUNCTION SKIPPED: $moduleName.${fn.name}() — too many params (${fn.params.size} > $MAX_EXPO_FUNCTION_PARAMS).")
+                    return
+                }
                 val params = fn.params.joinToString(", ") {
                     "${it.name}: ${it.type.toTsType(enumNames, dataNames, sealedNames, wrapperMode = true)}"
                 }
@@ -122,7 +147,10 @@ object TsEnumGenerator {
                 appendLine("  ${fn.name}: ($params): $ret => $native.${fn.name}($args),")
             }
             FunctionKind.SUSPEND -> {
-                if (fn.params.size > MAX_EXPO_FUNCTION_PARAMS) return
+                if (fn.params.size > MAX_EXPO_FUNCTION_PARAMS) {
+                    onSkip("FUNCTION SKIPPED: $moduleName.${fn.name}() — too many params (${fn.params.size} > $MAX_EXPO_FUNCTION_PARAMS).")
+                    return
+                }
                 val params = fn.params.joinToString(", ") {
                     "${it.name}: ${it.type.toTsType(enumNames, dataNames, sealedNames, wrapperMode = true)}"
                 }

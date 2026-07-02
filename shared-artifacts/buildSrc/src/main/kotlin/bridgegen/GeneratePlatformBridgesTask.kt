@@ -99,7 +99,7 @@ abstract class GeneratePlatformBridgesTask : DefaultTask() {
 
         for (sourceFile in module.files) {
 
-            val ktContent = AndroidGenerator.generateFile(sourceFile, module, pkg, androidPkg)
+            val ktContent = AndroidGenerator.generateFile(sourceFile, module, pkg, androidPkg, onSkip = { logger.quiet("\n  >> [Android] $it") })
             if (ktContent.isNotBlank()) {
                 File(androidOut, "${sourceFile.fileName}Module.kt").writeText(ktContent)
                 logger.lifecycle("  android/${sourceFile.fileName}Module.kt")
@@ -108,14 +108,14 @@ abstract class GeneratePlatformBridgesTask : DefaultTask() {
                 ktCount++
             }
 
-            val swiftContent = SwiftGenerator.generateFile(sourceFile, module, fw)
+            val swiftContent = SwiftGenerator.generateFile(sourceFile, module, fw, onSkip = { logger.quiet("\n  >> [iOS] $it") })
             if (swiftContent.isNotBlank()) {
                 File(iosOut, "${sourceFile.fileName}Module.swift").writeText(swiftContent)
                 logger.lifecycle("  ios/${sourceFile.fileName}Module.swift")
                 swiftCount++
             }
 
-            val tsContent = TsEnumGenerator.generate(sourceFile, module)
+            val tsContent = TsEnumGenerator.generate(sourceFile, module, onSkip = { logger.quiet("\n  >> [TS] $it") })
             if (tsContent.isNotBlank()) {
                 File(tsOut, "${sourceFile.fileName}.ts").writeText(tsContent)
                 logger.lifecycle("  ts/${sourceFile.fileName}.ts")

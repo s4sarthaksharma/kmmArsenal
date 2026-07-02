@@ -16,20 +16,65 @@ object SwiftGenerator {
         sourceFile: KmpSourceFile,
         module: KmpModule,
         frameworkName: String,
+        onSkip: (String) -> Unit = {},
     ): String {
         val enumNames   = module.declarations.filterIsInstance<KmpDeclaration.KmpEnum>().map { it.name }.toSet()
         val dataNames   = module.declarations.filterIsInstance<KmpDeclaration.KmpDataClass>().map { it.name }.toSet()
         val sealedNames = module.declarations.filterIsInstance<KmpDeclaration.KmpSealedClass>().map { it.name }.toSet()
 
         val records = sourceFile.declarations.filterIsInstance<KmpDeclaration.KmpDataClass>()
-            .filter { it.fields.isNotEmpty() }
+            .filter { dc ->
+                if (dc.fields.isEmpty()) {
+                    onSkip("DATA CLASS SKIPPED: ${dc.name} — no fields, no Record generated.")
+                    false
+                } else true
+            }
         val sealeds = sourceFile.declarations.filterIsInstance<KmpDeclaration.KmpSealedClass>()
 
         val bridgeableDecls = sourceFile.declarations.filter { decl ->
-            when (decl) {
-                is KmpDeclaration.KmpClass  -> !decl.isAbstract && decl.functions.isNotEmpty()
-                is KmpDeclaration.KmpObject -> decl.functions.isNotEmpty()
+            when {
+                decl is KmpDeclaration.KmpInterface -> {
+                    onSkip("CLASS SKIPPED: ${decl.name} — interfaces are not bridged.")
+                    false
+                }
+                decl is KmpDeclaration.KmpClass && decl.isAbstract -> {
+                    onSkip("CLASS SKIPPED: ${decl.name} — abstract classes are not bridged.")
+                    false
+                }
+                decl is KmpDeclaration.KmpClass && decl.functions.isEmpty() -> {
+                    onSkip("CLASS SKIPPED: ${decl.name} — no functions to bridge.")
+                    false
+                }
+                decl is KmpDeclaration.KmpObject && decl.functions.isEmpty() -> {
+                    onSkip("OBJECT SKIPPED: ${decl.name} — no functions to bridge.")
+                    false
+                }
+                decl is KmpDeclaration.KmpClass  -> true
+                decl is KmpDeclaration.KmpObject -> true
                 else -> false
+            }
+        }
+
+        for (dc in records) {
+            for (fn in dc.functions) {
+                onSkip("FUNCTION SKIPPED: ${dc.name}.${fn.name}() — member functions on data classes are not bridged.")
+            }
+        }
+        for (sealed in sealeds) {
+            for (fn in sealed.functions) {
+                onSkip("FUNCTION SKIPPED: ${sealed.name}.${fn.name}() — member functions on sealed classes are not bridged.")
+            }
+        }
+        for (decl in bridgeableDecls) {
+            for (fn in decl.declFunctions()) {
+                if (!fn.isBridgeable(enumNames, dataNames, sealedNames)) {
+                    val reason = when {
+                        fn.params.size > MAX_EXPO_FUNCTION_PARAMS -> "too many params (${fn.params.size} > $MAX_EXPO_FUNCTION_PARAMS)"
+                        !fn.returnType.isSwiftBridgeable(enumNames, dataNames, sealedNames) -> "unbridgeable return type"
+                        else -> "unbridgeable param type"
+                    }
+                    onSkip("FUNCTION SKIPPED: ${decl.declName()}.${fn.name}() — $reason.")
+                }
             }
         }
 
