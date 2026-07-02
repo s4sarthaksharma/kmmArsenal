@@ -2,10 +2,8 @@
   "name": "kmp-bridge",
   "version": "0.1.0",
   "description": "Expo native module bridging the KMP shared module to React Native",
-  "main": "index.ts",
   "files": [
     "src",
-    "index.ts",
     "android",
     "ios",
     "expo-module.config.json"

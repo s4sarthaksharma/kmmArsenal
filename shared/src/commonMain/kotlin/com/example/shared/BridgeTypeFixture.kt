@@ -1,0 +1,310 @@
+package com.example.shared
+
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
+
+/**
+ * Comprehensive fixture covering every declaration type and type-reference permutation
+ * that the ApiModel must represent.
+ *
+ * This file exists purely to exercise the klib reader and model validation pipeline.
+ * Method bodies use [TODO] stubs — nothing here is meant to be called at runtime.
+ */
+
+// ── Enum ──────────────────────────────────────────────────────────────────────
+
+enum class FixtureStatus { ACTIVE, INACTIVE, PENDING }
+
+// ── Data classes ──────────────────────────────────────────────────────────────
+
+/** Nested data class — appears as a [ClassRef] field inside [FixtureUser]. */
+data class FixtureAddress(
+    val street: String,
+    val city: String,
+    val zip: String?,           // nullable primitive
+)
+
+/**
+ * Data class exercising every primitive kind, nullable fields, enum reference,
+ * nested ClassRef, and collection fields.
+ */
+data class FixtureUser(
+    val id: String,
+    val age: Int,
+    val score: Double,
+    val active: Boolean,
+    val byteFlag: Byte,
+    val longId: Long,
+    val initial: Char,
+    val ratio: Float,
+    val status: FixtureStatus,          // ClassRef → enum
+    val address: FixtureAddress?,       // ClassRef, nullable
+    val tags: List<String>,             // CollectionType LIST
+    val metadata: Map<String, Int>,     // CollectionType MAP
+    val aliases: Set<String>,           // CollectionType SET
+)
+
+// ── Sealed class — all three variant kinds ────────────────────────────────────
+
+/**
+ * Sealed class with:
+ * - [Success]  — DataVariant (data class with fields)
+ * - [Empty]    — ObjectVariant (singleton, no fields)
+ * - [Failure]  — ClassVariant (regular class with fields)
+ * - [Partial]  — ClassVariant with isAbstract = true
+ */
+sealed class FixtureResult {
+    data class Success(val user: FixtureUser, val code: Int) : FixtureResult()
+    object Empty : FixtureResult()
+    class Failure(val message: String, val retryable: Boolean) : FixtureResult()
+    abstract class Partial(val hint: String) : FixtureResult()
+}
+
+/** Second sealed class to test multi-sealed-class modules. */
+sealed class FixtureAuthState {
+    object LoggedOut : FixtureAuthState()
+    data class LoggedIn(val user: FixtureUser, val token: String) : FixtureAuthState()
+    object Refreshing : FixtureAuthState()
+}
+
+// ── Interface ─────────────────────────────────────────────────────────────────
+
+/** Interface exercising all three function kinds. */
+interface FixtureRepository {
+    fun findById(id: String): FixtureUser                   // SYNC, ClassRef return
+    suspend fun fetchById(id: String): FixtureUser           // SUSPEND, ClassRef return
+    fun observeAll(): Flow<List<FixtureUser>>                // FLOW, nested Collection+ClassRef
+}
+
+// ── Object ────────────────────────────────────────────────────────────────────
+
+/** Singleton object exercising all three function kinds. */
+object FixtureAnalytics {
+    fun track(event: String): Unit = Unit
+    suspend fun flush(): Boolean = true
+    fun events(): Flow<String> = flow {
+        val labels = listOf("click", "view", "purchase", "share", "like")
+        var i = 0
+        while (true) {
+            emit("${labels[i % labels.size]}_$i")
+            i++
+            delay(1_000)
+        }
+    }
+}
+
+// ── Abstract class ────────────────────────────────────────────────────────────
+
+/** Abstract class — isAbstract = true on KmpClass. */
+abstract class FixtureBaseProcessor {
+    abstract fun process(input: String): String
+    abstract suspend fun processAsync(input: String): String
+}
+
+// ── Concrete class — every primitive as param and return ──────────────────────
+
+class FixturePrimitivesApi {
+    // All 9 primitive kinds as parameters in one function
+    fun allPrimitives(
+        s: String,
+        i: Int,
+        l: Long,
+        d: Double,
+        f: Float,
+        b: Boolean,
+        by: Byte,
+        sh: Short,
+        c: Char,
+    ): Unit = Unit
+
+    // Each primitive as a distinct return type
+    fun returnString(): String = ""
+    fun returnInt(): Int = 0
+    fun returnLong(): Long = 0L
+    fun returnDouble(): Double = 0.0
+    fun returnFloat(): Float = 0f
+    fun returnBoolean(): Boolean = false
+    fun returnByte(): Byte = 0
+    fun returnShort(): Short = 0
+    fun returnChar(): Char = 'a'
+
+    // Nullable primitives
+    fun nullableParam(s: String?, i: Int?): String? = s
+    fun returnNullableInt(): Int? = null
+    fun returnNullableBool(): Boolean? = null
+}
+
+// ── Concrete class — collections and type argument variance ───────────────────
+
+class FixtureCollectionsApi {
+    // Basic collections
+    fun getStringList(): List<String> = emptyList()
+    fun getIntSet(): Set<Int> = emptySet()
+    fun getStringIntMap(): Map<String, Int> = emptyMap()
+
+    // Nullable collection reference
+    fun getNullableList(): List<String>? = null
+
+    // Nested generic
+    fun getNestedList(): List<List<String>> = emptyList()
+    fun getUserMap(): Map<String, List<FixtureUser>> = emptyMap()
+
+    // ClassRef inside collection
+    fun getUserList(): List<FixtureUser> = emptyList()
+
+    // Covariant type argument (out)
+    fun covariantList(): List<out FixtureUser> = emptyList()
+
+    // Star projection (*)
+    fun starList(): List<*> = emptyList<Any>()
+    fun starMap(): Map<*, *> = emptyMap<Any, Any>()
+}
+
+// ── Concrete class — all async patterns ───────────────────────────────────────
+
+class FixtureAsyncApi {
+    // SYNC
+    fun greet(name: String): String = "Hello, $name"
+
+    // SUSPEND
+    suspend fun fetchUser(id: String): FixtureUser {
+        delay(200)
+        return FixtureUser(
+            id          = id,
+            age         = 28,
+            score       = 4.85,
+            active      = true,
+            byteFlag    = 7,
+            longId      = 1_234_567_890L,
+            initial     = 'K',
+            ratio       = 0.75f,
+            status      = FixtureStatus.ACTIVE,
+            address     = FixtureAddress(street = "1 KMP Lane", city = "Kotlinville", zip = "12345"),
+            tags        = listOf("android", "kmp", "bridge"),
+            metadata    = mapOf("version" to 1, "build" to 42),
+            aliases     = setOf("alias_$id", "fixture"),
+        )
+    }
+
+    suspend fun fetchNullableUser(id: String): FixtureUser? = null
+    suspend fun deleteUser(id: String): Unit = Unit
+
+    // FLOW — various element types
+    fun observeStatus(): Flow<FixtureStatus> = flow {
+        val statuses = FixtureStatus.entries
+        var i = 0
+        while (true) { emit(statuses[i++ % statuses.size]); delay(1_000) }
+    }
+
+    fun observeUser(): Flow<FixtureUser> = flow {
+        var i = 0
+        while (true) {
+            emit(FixtureUser(
+                id       = "live_$i",
+                age      = 20 + i,
+                score    = i * 0.1,
+                active   = i % 2 == 0,
+                byteFlag = (i % 127).toByte(),
+                longId   = i.toLong() * 1_000,
+                initial  = ('A' + i % 26),
+                ratio    = i * 0.01f,
+                status   = FixtureStatus.entries[i % 3],
+                address  = FixtureAddress("$i Main St", "City $i", if (i % 2 == 0) "${i}000" else null),
+                tags     = listOf("tag_$i", "live"),
+                metadata = mapOf("tick" to i),
+                aliases  = setOf("live_alias_$i"),
+            ))
+            i++
+            delay(1_500)
+        }
+    }
+
+    fun observeResult(): Flow<FixtureResult> = flow {
+        var i = 0
+        while (true) {
+            val result = when (i % 3) {
+                0 -> FixtureResult.Success(
+                    user = FixtureUser("result_$i", 30, 9.9, true, 1, 999L, 'R', 1f,
+                        FixtureStatus.ACTIVE, null, listOf("ok"), mapOf("code" to i), setOf()),
+                    code = 200 + i,
+                )
+                1 -> FixtureResult.Empty
+                else -> FixtureResult.Failure(message = "err_$i", retryable = i % 2 == 0)
+            }
+            emit(result)
+            i++
+            delay(2_000)
+        }
+    }
+
+    fun observeAuthState(): Flow<FixtureAuthState> = flow {
+        val states: List<FixtureAuthState> = listOf(
+            FixtureAuthState.LoggedOut,
+            FixtureAuthState.Refreshing,
+            FixtureAuthState.LoggedIn(
+                user  = FixtureUser("auth_user", 25, 5.0, true, 0, 0L, 'U', 0f,
+                    FixtureStatus.ACTIVE, null, emptyList(), emptyMap(), emptySet()),
+                token = "tok_fixture",
+            ),
+        )
+        var i = 0
+        while (true) { emit(states[i++ % states.size]); delay(2_000) }
+    }
+
+    fun observeList(): Flow<List<FixtureUser>> = flow {
+        val base = FixtureUser("list_u", 21, 3.0, true, 0, 0L, 'L', 0f,
+            FixtureStatus.PENDING, null, emptyList(), emptyMap(), emptySet())
+        var i = 0
+        while (true) {
+            emit((0..i).map { base.copy(id = "item_$it", age = 21 + it) })
+            i++
+            delay(1_500)
+        }
+    }
+
+    fun observeNullableString(): Flow<String?> = flow {
+        var i = 0
+        while (true) { emit(if (i % 2 == 0) "value_$i" else null); i++; delay(1_000) }
+    }
+
+    fun observeMap(): Flow<Map<String, FixtureUser>> = flow {
+        val base = FixtureUser("map_u", 30, 7.5, true, 0, 0L, 'M', 0f,
+            FixtureStatus.INACTIVE, null, emptyList(), emptyMap(), emptySet())
+        var i = 0
+        while (true) {
+            emit(mapOf(
+                "current"  to base.copy(id = "current_$i",  age = 30 + i),
+                "previous" to base.copy(id = "previous_$i", age = 29 + i),
+            ))
+            i++
+            delay(2_000)
+        }
+    }
+}
+
+// ── Generic class — TypeParam in model ────────────────────────────────────────
+
+/**
+ * Generic class so the model contains [KmpTypeRef.TypeParam] entries.
+ * Exercises T as return type, nullable T, and T inside a collection and Flow.
+ */
+class FixtureGenericApi<T> {
+    @Suppress("UNCHECKED_CAST")
+    fun get(): T = "generic_value" as T
+
+    fun getOrNull(): T? = null
+    fun wrap(): List<T> = emptyList()
+
+    @Suppress("UNCHECKED_CAST")
+    fun observe(): Flow<T> = flow {
+        var i = 0
+        while (true) { emit("generic_$i" as T); i++; delay(1_000) }
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    suspend fun fetch(): T {
+        delay(100)
+        return "fetched_generic" as T
+    }
+}

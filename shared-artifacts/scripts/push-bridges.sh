@@ -1,20 +1,25 @@
 #!/usr/bin/env bash
-# Iterates registry.json, reads kmp metadata from each consumer,
-# builds artifacts via shared-artifacts, and pushes them in.
+# scripts/push-bridges.sh
 #
-# Usage:
-#   bash scripts/push-bridges.sh            # artifacts only
-#   bash scripts/push-bridges.sh --publish  # artifacts + npm run push:local
+# Generates platform bridge code from the KMP klib and pushes it into each
+# registered consumer package (listed in registry.json).
+#
+# Prerequisite — run once in shared/ whenever the KMP source changes:
+#   ./gradlew publishToMavenLocal
+#
+# Usage (run from shared-artifacts/):
+#   bash scripts/push-bridges.sh            # generate + build XCFramework + copy everything
+#   bash scripts/push-bridges.sh --publish  # same + yalc push to consumer apps
+
 set -euo pipefail
 
 ARTIFACTS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$ARTIFACTS_ROOT/.." && pwd)"
 REGISTRY="$ARTIFACTS_ROOT/registry.json"
 
 PUBLISH=false
 for arg in "$@"; do
-  case $arg in
-    --publish) PUBLISH=true ;;
-  esac
+  [[ "$arg" == "--publish" ]] && PUBLISH=true
 done
 
 CONSUMER_PATHS=$(node -e "require('$REGISTRY').forEach(p => console.log(p))")
@@ -23,79 +28,57 @@ while IFS= read -r RELATIVE_PATH; do
   CONSUMER="$(cd "$ARTIFACTS_ROOT/$RELATIVE_PATH" && pwd)"
   PACKAGE_JSON="$CONSUMER/package.json"
 
-  echo ""
-  echo "==> Processing: $RELATIVE_PATH"
-
-  KMP_GROUP=$(node -e "console.log(require('$PACKAGE_JSON').kmp.group)")
+  KMP_NAME=$(node -e "console.log(require('$PACKAGE_JSON').name)")
   KMP_ARTIFACT=$(node -e "console.log(require('$PACKAGE_JSON').kmp.artifact)")
+  KMP_GROUP=$(node -e "console.log(require('$PACKAGE_JSON').kmp.group)")
   KMP_VERSION=$(node -e "console.log(require('$PACKAGE_JSON').kmp.version)")
   KMP_FRAMEWORK=$(node -e "console.log(require('$PACKAGE_JSON').kmp.frameworkName)")
-  KMP_SOURCE_DIR="../${KMP_ARTIFACT}/src/commonMain"
-  KMP_MODULE_NAME=$(node -e "console.log(require('$PACKAGE_JSON').kmp.moduleName || 'KmpBridge')")
+  KMP_ANDROID_PKG=$(node -e "console.log('expo.modules.' + '$KMP_NAME'.replace(/-/g, ''))")
 
-  GRADLE_PROPS="-PkmpGroup=$KMP_GROUP -PkmpArtifact=$KMP_ARTIFACT -PkmpVersion=$KMP_VERSION -PkmpFrameworkName=$KMP_FRAMEWORK -PkmpSourceDir=$KMP_SOURCE_DIR -PkmpModuleName=$KMP_MODULE_NAME"
+  SHARED="$ROOT/$KMP_ARTIFACT"
 
-  echo "==> [Android] resolving $KMP_GROUP:$KMP_ARTIFACT-android:$KMP_VERSION"
-  ( cd "$ARTIFACTS_ROOT" && ./gradlew resolveAndroidAar $GRADLE_PROPS )
-  mkdir -p "$CONSUMER/android/libs"
-  cp "$ARTIFACTS_ROOT/build/outputs/android/$KMP_ARTIFACT.aar" "$CONSUMER/android/libs/$KMP_ARTIFACT.aar"
-  echo "==> [Android] pushed $KMP_ARTIFACT.aar"
+  GRADLE_PROPS="-PkmpGroup=$KMP_GROUP -PkmpArtifact=$KMP_ARTIFACT -PkmpVersion=$KMP_VERSION"
+  GRADLE_PROPS="$GRADLE_PROPS -PkmpFrameworkName=$KMP_FRAMEWORK"
+  GRADLE_PROPS="$GRADLE_PROPS -PkmpAndroidPackage=$KMP_ANDROID_PKG"
+  GRADLE_PROPS="$GRADLE_PROPS -PkmpConsumerDir=$CONSUMER"
 
-  echo "==> [iOS] assembling $KMP_FRAMEWORK XCFramework"
-  ( cd "$ARTIFACTS_ROOT" && ./gradlew "assemble${KMP_FRAMEWORK}ReleaseXCFramework" $GRADLE_PROPS )
+  echo ""
+  echo "==> Consumer: $RELATIVE_PATH  ($KMP_GROUP:$KMP_ARTIFACT:$KMP_VERSION)"
+  echo "    Android package: $KMP_ANDROID_PKG"
+  echo ""
+
+  echo "==> [1/5] Building iOS XCFramework (SKIE applied in shared)"
+  (cd "$SHARED" && ./gradlew "assemble${KMP_FRAMEWORK}ReleaseXCFramework" -q)
+
+  echo "==> [2/5] Copying $KMP_FRAMEWORK.xcframework"
   rm -rf "$CONSUMER/ios/Frameworks/$KMP_FRAMEWORK.xcframework"
   mkdir -p "$CONSUMER/ios/Frameworks"
-  cp -R "$ARTIFACTS_ROOT/build/XCFrameworks/release/$KMP_FRAMEWORK.xcframework" "$CONSUMER/ios/Frameworks/"
-  touch "$CONSUMER/ios/Frameworks/$KMP_FRAMEWORK.xcframework"
-  echo "==> [iOS] pushed $KMP_FRAMEWORK.xcframework"
+  cp -r "$SHARED/build/XCFrameworks/release/$KMP_FRAMEWORK.xcframework" \
+        "$CONSUMER/ios/Frameworks/"
+  echo "    $KMP_FRAMEWORK.xcframework"
 
-  echo "==> [Bridge] generating bridge code from $KMP_SOURCE_DIR"
-  ( cd "$ARTIFACTS_ROOT" && ./gradlew generateBridgeCode $GRADLE_PROPS )
+  echo "==> [3/5] Generating platform bridges"
+  (cd "$ARTIFACTS_ROOT" && ./gradlew generatePlatformBridges $GRADLE_PROPS -q)
 
-  BRIDGE_OUT="$ARTIFACTS_ROOT/build/generated/bridge"
-  ANDROID_BRIDGE_DIR="$CONSUMER/android/src/main/java/expo/modules/kmpbridge"
+  echo "==> [4/5] Copying shared.aar"
+  (cd "$ARTIFACTS_ROOT" && ./gradlew resolveAndroidAar $GRADLE_PROPS -q)
+  mkdir -p "$CONSUMER/android/libs"
+  cp "$ARTIFACTS_ROOT/build/outputs/android/$KMP_ARTIFACT.aar" \
+     "$CONSUMER/android/libs/$KMP_ARTIFACT.aar"
+  echo "    $KMP_ARTIFACT.aar"
 
-  # Remove stale generated files before copying so deleted KMP classes don't linger.
-  rm -f "$CONSUMER/ios/"*Module.swift
-  find "$ANDROID_BRIDGE_DIR" -name "*Module.kt" -delete 2>/dev/null || true
-  rm -f "$CONSUMER/src/"*Module.ts
-
-  # iOS — one *Module.swift per KMP class, auto-discovered by the podspec *.swift glob.
-  for f in "$BRIDGE_OUT/ios/"*Module.swift; do
-    [ -f "$f" ] || continue
-    name=$(basename "$f")
-    cp "$f" "$CONSUMER/ios/$name"
-    echo "==> [Bridge] pushed $name"
-  done
-
-  # Android — one *Module.kt per KMP class, auto-discovered by expo-module-gradle-plugin.
-  mkdir -p "$ANDROID_BRIDGE_DIR"
-  for f in "$BRIDGE_OUT/android/"*Module.kt; do
-    [ -f "$f" ] || continue
-    name=$(basename "$f")
-    cp "$f" "$ANDROID_BRIDGE_DIR/$name"
-    echo "==> [Bridge] pushed $name"
-  done
-
-  # TypeScript — one src/*Module.ts per KMP class + index.ts at the package root.
-  mkdir -p "$CONSUMER/src"
-  for f in "$BRIDGE_OUT/ts/src/"*Module.ts; do
-    [ -f "$f" ] || continue
-    name=$(basename "$f")
-    cp "$f" "$CONSUMER/src/$name"
-  done
-  cp "$BRIDGE_OUT/ts/index.ts" "$CONSUMER/index.ts"
-  # expo-module.config.json must list every native module by class name so the
-  # Expo toolchain can generate ExpoModulesProvider at native build time.
-  cp "$BRIDGE_OUT/expo-module.config.json" "$CONSUMER/expo-module.config.json"
-  echo "==> [Bridge] pushed TypeScript bridge + expo-module.config.json"
+  echo "==> [5/5] Done generating for $RELATIVE_PATH"
 
   if [ "$PUBLISH" = "true" ]; then
-    echo "==> publishing $RELATIVE_PATH via yalc"
-    ( cd "$CONSUMER" && npm run push:local )
+    echo ""
+    echo "==> Publishing $RELATIVE_PATH via yalc"
+    (cd "$CONSUMER" && npm run push:local)
   fi
 
 done <<< "$CONSUMER_PATHS"
 
 echo ""
-echo "==> All bridges processed."
+echo "==> All consumers processed."
+echo ""
+echo "    Android:  cd <expo-app> && npx expo run:android"
+echo "    iOS:      cd <expo-app>/ios && pod install && cd .. && npx expo run:ios"

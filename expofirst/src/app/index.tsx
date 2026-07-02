@@ -10,14 +10,19 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
+import { Calculator } from "kmp-bridge/src/Calculator";
+import { Greeting } from "kmp-bridge/src/Greeting";
+import { AsyncWorker } from "kmp-bridge/src/AsyncWorker";
+import { TickerService } from "kmp-bridge/src/TickerService";
+import { TrafficLight, LightColor } from "kmp-bridge/src/TrafficLight";
 import {
-  AsyncWorker,
-  Calculator,
-  Greeting,
-  LightColor,
-  TickerService,
-  TrafficLight,
-} from "kmp-bridge";
+  FixtureAsyncApi,
+  FixtureAnalytics,
+  FixturePrimitivesApi,
+  FixtureStatus,
+  type FixtureUser,
+  type FixtureResult,
+} from "kmp-bridge/src/BridgeTypeFixture";
 
 // ─── Design tokens ────────────────────────────────────────────────────────────
 const C = {
@@ -423,10 +428,215 @@ function TrafficLightTab() {
   );
 }
 
+// ─── Tab: Fixture ─────────────────────────────────────────────────────────────
+
+function JsonRow({ value }: { value: unknown }) {
+  return (
+    <View style={s.repl}>
+      <Text style={s.replArrow}>→</Text>
+      <Text style={[s.replValue, { fontSize: 11 }]} numberOfLines={6}>
+        {JSON.stringify(value, null, 2)}
+      </Text>
+    </View>
+  );
+}
+
+function FixtureTab() {
+  // Primitives
+  const [primStr,  setPrimStr]  = useState<string  | null>(null);
+  const [primInt,  setPrimInt]  = useState<number  | null>(null);
+  const [primLong, setPrimLong] = useState<number  | null>(null);
+  const [primBool, setPrimBool] = useState<boolean | null>(null);
+  const [nullInt,  setNullInt]  = useState<number  | null | undefined>(undefined);
+
+  // Async — fetchUser
+  const [userId,      setUserId]      = useState("test-id");
+  const [user,        setUser]        = useState<FixtureUser | null>(null);
+  const [userPending, setUserPending] = useState(false);
+
+  // Async — fetchNullableUser
+  const [nullUser,        setNullUser]        = useState<FixtureUser | null | undefined>(undefined);
+  const [nullUserPending, setNullUserPending] = useState(false);
+
+  // Async — deleteUser
+  const [deleted, setDeleted] = useState<string | null>(null);
+
+  // Flow — observeStatus
+  const [status,   setStatus]   = useState<string | null>(null);
+  const [statusOn, setStatusOn] = useState(false);
+  const statusSub = useRef<ReturnType<typeof FixtureAsyncApi.addObserveStatusListener> | null>(null);
+
+  // Flow — observeUser
+  const [liveUser,   setLiveUser]   = useState<FixtureUser | null>(null);
+  const [liveUserOn, setLiveUserOn] = useState(false);
+  const liveUserSub = useRef<ReturnType<typeof FixtureAsyncApi.addObserveUserListener> | null>(null);
+
+  // Flow — observeResult
+  const [result,   setResult]   = useState<FixtureResult | null>(null);
+  const [resultOn, setResultOn] = useState(false);
+  const resultSub = useRef<ReturnType<typeof FixtureAsyncApi.addObserveResultListener> | null>(null);
+
+  // Object — FixtureAnalytics
+  const [tracked,      setTracked]      = useState<string  | null>(null);
+  const [flushed,      setFlushed]      = useState<boolean | null>(null);
+  const [flushPending, setFlushPending] = useState(false);
+  const [event,        setEvent]        = useState<string  | null>(null);
+  const [eventsOn,     setEventsOn]     = useState(false);
+  const eventSub = useRef<ReturnType<typeof FixtureAnalytics.addEventsListener> | null>(null);
+
+  useEffect(() => () => {
+    FixtureAsyncApi.stopObserveStatus();  statusSub.current?.remove();
+    FixtureAsyncApi.stopObserveUser();    liveUserSub.current?.remove();
+    FixtureAsyncApi.stopObserveResult();  resultSub.current?.remove();
+    FixtureAnalytics.stopEvents();        eventSub.current?.remove();
+  }, []);
+
+  const toggleStatus = () => {
+    if (statusOn) {
+      FixtureAsyncApi.stopObserveStatus(); statusSub.current?.remove(); setStatusOn(false);
+    } else {
+      FixtureAsyncApi.startObserveStatus();
+      statusSub.current = FixtureAsyncApi.addObserveStatusListener(e => setStatus(e.value));
+      setStatusOn(true);
+    }
+  };
+
+  const toggleLiveUser = () => {
+    if (liveUserOn) {
+      FixtureAsyncApi.stopObserveUser(); liveUserSub.current?.remove(); setLiveUserOn(false);
+    } else {
+      FixtureAsyncApi.startObserveUser();
+      liveUserSub.current = FixtureAsyncApi.addObserveUserListener(e => setLiveUser(e.value));
+      setLiveUserOn(true);
+    }
+  };
+
+  const toggleResult = () => {
+    if (resultOn) {
+      FixtureAsyncApi.stopObserveResult(); resultSub.current?.remove(); setResultOn(false);
+    } else {
+      FixtureAsyncApi.startObserveResult();
+      resultSub.current = FixtureAsyncApi.addObserveResultListener(e => setResult(e.value));
+      setResultOn(true);
+    }
+  };
+
+  const toggleEvents = () => {
+    if (eventsOn) {
+      FixtureAnalytics.stopEvents(); eventSub.current?.remove(); setEventsOn(false);
+    } else {
+      FixtureAnalytics.startEvents();
+      eventSub.current = FixtureAnalytics.addEventsListener(e => setEvent(e.value));
+      setEventsOn(true);
+    }
+  };
+
+  return (
+    <ScrollView contentContainerStyle={s.tab} keyboardShouldPersistTaps="handled">
+
+      {/* ── Primitives ─────────────────────────────────────── */}
+      <Text style={s.section}>FixturePrimitivesApi</Text>
+
+      <FnCard name="returnString / Int / Long / Boolean">
+        <Row2>
+          <Btn label="String" onPress={() => setPrimStr(FixturePrimitivesApi.returnString())} />
+          <Btn label="Int"    onPress={() => setPrimInt(FixturePrimitivesApi.returnInt())} />
+          <Btn label="Long"   onPress={() => setPrimLong(FixturePrimitivesApi.returnLong())} />
+          <Btn label="Bool"   onPress={() => setPrimBool(FixturePrimitivesApi.returnBoolean())} />
+        </Row2>
+        {primStr  != null && <ReplyRow value={`String → ${primStr}`} />}
+        {primInt  != null && <ReplyRow value={`Int    → ${primInt}`} />}
+        {primLong != null && <ReplyRow value={`Long   → ${primLong}`} />}
+        {primBool != null && <ReplyRow value={`Bool   → ${primBool}`} />}
+      </FnCard>
+
+      <FnCard name="returnNullableInt(): Int?">
+        <Btn label="Call" onPress={() => setNullInt(FixturePrimitivesApi.returnNullableInt())} />
+        {nullInt !== undefined && <ReplyRow value={`→ ${nullInt}`} />}
+      </FnCard>
+
+      {/* ── FixtureAsyncApi — suspend ──────────────────────── */}
+      <Text style={s.section}>FixtureAsyncApi — suspend</Text>
+
+      <FnCard name="fetchUser(id): FixtureUser  [Record return]">
+        <StrIn value={userId} onChange={setUserId} placeholder="user id" />
+        <Btn label={userPending ? "Fetching…" : "fetchUser"} disabled={userPending} onPress={async () => {
+          setUserPending(true);
+          try { setUser(await FixtureAsyncApi.fetchUser(userId)); }
+          finally { setUserPending(false); }
+        }} />
+        {user != null && <JsonRow value={user} />}
+      </FnCard>
+
+      <FnCard name="fetchNullableUser(id): FixtureUser?">
+        <Btn label={nullUserPending ? "Fetching…" : "fetchNullableUser"} disabled={nullUserPending}
+          onPress={async () => {
+            setNullUserPending(true);
+            try { setNullUser(await FixtureAsyncApi.fetchNullableUser("nullable-test")); }
+            finally { setNullUserPending(false); }
+          }} />
+        {nullUser !== undefined && <JsonRow value={nullUser} />}
+      </FnCard>
+
+      <FnCard name="deleteUser(id): Unit">
+        <Btn label="deleteUser" onPress={async () => {
+          await FixtureAsyncApi.deleteUser("del-123");
+          setDeleted("done (Unit returned)");
+        }} />
+        {deleted != null && <ReplyRow value={deleted} />}
+      </FnCard>
+
+      {/* ── FixtureAsyncApi — Flows ────────────────────────── */}
+      <Text style={s.section}>FixtureAsyncApi — Flows</Text>
+
+      <FnCard name="observeStatus(): Flow<FixtureStatus>">
+        <Btn label={statusOn ? "Stop" : "Start"} onPress={toggleStatus} muted={statusOn} />
+        {status != null && <ReplyRow value={status} live={statusOn} />}
+      </FnCard>
+
+      <FnCard name="observeUser(): Flow<FixtureUser>  [Record flow]">
+        <Btn label={liveUserOn ? "Stop" : "Start"} onPress={toggleLiveUser} muted={liveUserOn} />
+        {liveUser != null && <JsonRow value={liveUser} />}
+      </FnCard>
+
+      <FnCard name="observeResult(): Flow<FixtureResult>  [Sealed flow]">
+        <Btn label={resultOn ? "Stop" : "Start"} onPress={toggleResult} muted={resultOn} />
+        {result != null && <JsonRow value={result} />}
+      </FnCard>
+
+      {/* ── FixtureAnalytics (object singleton) ───────────── */}
+      <Text style={s.section}>FixtureAnalytics (object singleton)</Text>
+
+      <FnCard name="track(event): Unit">
+        <Btn label="track('test_event')" onPress={() => {
+          FixtureAnalytics.track("test_event");
+          setTracked("called (Unit)");
+        }} />
+        {tracked != null && <ReplyRow value={tracked} />}
+      </FnCard>
+
+      <FnCard name="flush(): suspend Boolean">
+        <Btn label={flushPending ? "Flushing…" : "flush()"} disabled={flushPending} onPress={async () => {
+          setFlushPending(true);
+          try { setFlushed(await FixtureAnalytics.flush()); }
+          finally { setFlushPending(false); }
+        }} />
+        {flushed != null && <ReplyRow value={flushed} />}
+      </FnCard>
+
+      <FnCard name="events(): Flow<String>">
+        <Btn label={eventsOn ? "Stop" : "Start"} onPress={toggleEvents} muted={eventsOn} />
+        {event != null && <ReplyRow value={event} live={eventsOn} />}
+      </FnCard>
+
+    </ScrollView>
+  );
+}
+
 // ─── Root screen ─────────────────────────────────────────────────────────────
 
-type Tab = "Greeting" | "Calculator" | "AsyncWorker" | "TickerService" | "TrafficLight";
-const TABS: Tab[] = ["Greeting", "Calculator", "AsyncWorker", "TickerService", "TrafficLight"];
+type Tab = "Greeting" | "Calculator" | "AsyncWorker" | "TickerService" | "TrafficLight" | "Fixture";
+const TABS: Tab[] = ["Greeting", "Calculator", "AsyncWorker", "TickerService", "TrafficLight", "Fixture"];
 
 export default function Index() {
   const [tab, setTab] = useState<Tab>("Greeting");
@@ -461,6 +671,7 @@ export default function Index() {
       {tab === "AsyncWorker"   && <AsyncWorkerTab />}
       {tab === "TickerService" && <TickerServiceTab />}
       {tab === "TrafficLight"  && <TrafficLightTab />}
+      {tab === "Fixture"       && <FixtureTab />}
     </KeyboardAvoidingView>
   );
 }
@@ -652,6 +863,16 @@ const s = StyleSheet.create({
     fontFamily: MONO,
     color: C.text,
     fontWeight: "600",
+  },
+
+  // Section header (used in FixtureTab)
+  section: {
+    fontSize: 11,
+    fontFamily: MONO,
+    color: C.muted,
+    letterSpacing: 0.8,
+    textTransform: "uppercase",
+    marginTop: 4,
   },
 
   // Misc

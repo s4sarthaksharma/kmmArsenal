@@ -1,4 +1,12 @@
-# KMP build outputs copied in by sync scripts (build output, not source)
+# Generated bridge files — produced by push-bridges.sh, never committed
+android/src/main/java/expo/modules/kmpbridge/*.kt
+ios/*Module.swift
+!ios/KmpBridgeModule.swift
+src/
+expo-module.config.json
+index.ts
+
+# KMP build outputs copied in by push-bridges.sh
 ios/Frameworks/
 android/libs/
 

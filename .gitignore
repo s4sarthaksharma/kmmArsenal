@@ -4,3 +4,6 @@
 # macOS
 .DS_Store
 **/.DS_Store
+
+# Local scratch / personal notes (not tracked)
+/local/

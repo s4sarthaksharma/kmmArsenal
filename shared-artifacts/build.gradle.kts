@@ -1,54 +1,14 @@
-import bridgegen.GenerateBridgeTask
-import org.jetbrains.kotlin.gradle.dsl.JvmTarget
-import org.jetbrains.kotlin.gradle.plugin.mpp.apple.XCFramework
+import bridgegen.DumpKmpModelTask
+import bridgegen.GeneratePlatformBridgesTask
 
-plugins {
-    kotlin("multiplatform")
-    id("com.android.library")
-    id("co.touchlab.skie")
-}
-
-val kmpGroup         = (project.findProperty("kmpGroup")         as String?) ?: "com.example.shared"
-val kmpArtifact      = (project.findProperty("kmpArtifact")      as String?) ?: "shared"
-val kmpVersion       = (project.findProperty("kmpVersion")       as String?) ?: "1.0.0"
-val kmpFrameworkName = (project.findProperty("kmpFrameworkName") as String?) ?: "Shared"
-val kmpSourceDir     = "../$kmpArtifact/src/commonMain"
-val kmpModuleName    = (project.findProperty("kmpModuleName")    as String?) ?: "KmpBridge"
-
-group   = "com.example.shared.artifacts"
-version = kmpVersion
-
-kotlin {
-    androidTarget {
-        compilations.all {
-            compileTaskProvider.configure {
-                compilerOptions {
-                    jvmTarget.set(JvmTarget.JVM_17)
-                }
-            }
-        }
-    }
-
-    val xcframework = XCFramework(kmpFrameworkName)
-    listOf(
-        iosX64(),
-        iosArm64(),
-        iosSimulatorArm64(),
-    ).forEach { iosTarget ->
-        iosTarget.binaries.framework {
-            baseName = kmpFrameworkName
-            isStatic = true
-            xcframework.add(this)
-            export("$kmpGroup:$kmpArtifact:$kmpVersion")
-        }
-    }
-
-    sourceSets {
-        commonMain.dependencies {
-            api("$kmpGroup:$kmpArtifact:$kmpVersion")
-        }
-    }
-}
+val kmpGroup          = (project.findProperty("kmpGroup")          as String?) ?: "com.example.shared"
+val kmpArtifact       = (project.findProperty("kmpArtifact")       as String?) ?: "shared"
+val kmpVersion        = (project.findProperty("kmpVersion")        as String?) ?: "1.0.0"
+val kmpFrameworkName  = (project.findProperty("kmpFrameworkName")  as String?) ?: "Shared"
+val kmpAndroidPackage = (project.findProperty("kmpAndroidPackage") as String?) ?: "expo.modules.kmpbridge"
+val kmpConsumerDir    = (project.findProperty("kmpConsumerDir")    as String?) ?: "../kmp-bridge"
+val kmpSourceDir      = "../$kmpArtifact/src/commonMain"
+val androidPkgPath    = kmpAndroidPackage.replace('.', '/')
 
 val sharedAar by configurations.creating {
     isTransitive = false
@@ -64,22 +24,20 @@ val resolveAndroidAar by tasks.registering(Copy::class) {
     rename { "$kmpArtifact.aar" }
 }
 
-val generateBridgeCode by tasks.registering(GenerateBridgeTask::class) {
-    sourceDir.set(file(kmpSourceDir))
-    outputDir.set(layout.buildDirectory.dir("generated/bridge"))
-    frameworkName.set(kmpFrameworkName)
-    kmpPackageName.set(kmpGroup)
-    moduleName.set(kmpModuleName)
+val dumpKmpModel by tasks.registering(DumpKmpModelTask::class) {
+    klibDir.set(file("../$kmpArtifact/build/classes/kotlin/metadata/commonMain"))
+    targetPackage.set(kmpGroup)
+    outputFile.set(layout.buildDirectory.file("kmp-model-dump.txt"))
 }
 
-android {
-    namespace = "com.example.shared.artifacts"
-    compileSdk = 35
-    defaultConfig {
-        minSdk = 24
-    }
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
-    }
+val generatePlatformBridges by tasks.registering(GeneratePlatformBridgesTask::class) {
+    klibDir.set(file("../$kmpArtifact/build/classes/kotlin/metadata/commonMain"))
+    sourceDir.set(file(kmpSourceDir))
+    kmpPackageName.set(kmpGroup)
+    frameworkName.set(kmpFrameworkName)
+    androidPackage.set(kmpAndroidPackage)
+    androidOutDir.set(file("$kmpConsumerDir/android/src/main/java/$androidPkgPath"))
+    iosOutDir.set(file("$kmpConsumerDir/ios"))
+    tsOutDir.set(file("$kmpConsumerDir/src"))
+    consumerRoot.set(file(kmpConsumerDir))
 }
