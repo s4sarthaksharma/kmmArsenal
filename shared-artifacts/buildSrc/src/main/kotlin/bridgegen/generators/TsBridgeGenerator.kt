@@ -4,7 +4,7 @@ import bridgegen.*
 
 private const val MAX_EXPO_FUNCTION_PARAMS = 8
 
-object TsEnumGenerator {
+object TsBridgeGenerator {
 
     fun generate(sourceFile: KmpSourceFile, module: KmpModule, onSkip: (String) -> Unit = {}): String {
         val enums    = sourceFile.declarations.filterIsInstance<KmpDeclaration.KmpEnum>()
@@ -59,10 +59,10 @@ object TsEnumGenerator {
                 appendLine("}")
             }
 
-            // 2. Data class interfaces
+            // 2. Data class types
             for (d in datas) {
                 appendLine()
-                appendLine("export interface ${d.name} {")
+                appendLine("export type ${d.name} = {")
                 for (field in d.fields) {
                     appendLine("  ${field.name}: ${field.type.toTsType(enumNames, dataNames, sealedNames)}")
                 }

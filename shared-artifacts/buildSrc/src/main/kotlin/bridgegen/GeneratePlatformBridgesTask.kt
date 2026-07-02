@@ -2,7 +2,7 @@ package bridgegen
 
 import bridgegen.generators.AndroidGenerator
 import bridgegen.generators.SwiftGenerator
-import bridgegen.generators.TsEnumGenerator
+import bridgegen.generators.TsBridgeGenerator
 import org.gradle.api.DefaultTask
 import org.gradle.api.file.DirectoryProperty
 import org.gradle.api.provider.Property
@@ -115,7 +115,7 @@ abstract class GeneratePlatformBridgesTask : DefaultTask() {
                 swiftCount++
             }
 
-            val tsContent = TsEnumGenerator.generate(sourceFile, module, onSkip = { logger.quiet("\n  >> [TS] $it") })
+            val tsContent = TsBridgeGenerator.generate(sourceFile, module, onSkip = { logger.quiet("\n  >> [TS] $it") })
             if (tsContent.isNotBlank()) {
                 File(tsOut, "${sourceFile.fileName}.ts").writeText(tsContent)
                 logger.lifecycle("  ts/${sourceFile.fileName}.ts")
