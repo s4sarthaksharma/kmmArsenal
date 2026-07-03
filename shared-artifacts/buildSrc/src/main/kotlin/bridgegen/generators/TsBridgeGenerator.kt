@@ -559,16 +559,20 @@ object TsBridgeGenerator {
             this is KmpTypeRef.ClassRef -> "unknown"
             this is KmpTypeRef.CollectionType -> when (kind) {
                 CollectionKind.LIST, CollectionKind.SET -> {
-                    val elem = (typeArgs.firstOrNull() as? KmpTypeArg.Invariant)
-                        ?.type?.toTsType(enumNames, dataNames, sealedNames, interfaceNames, abstractNames, wrapperMode) ?: "unknown"
-                    "$elem[]"
+                    val elem = typeArgs.getOrNull(0)?.typeOrNull()
+                        ?.toTsType(enumNames, dataNames, sealedNames, interfaceNames, abstractNames, wrapperMode) ?: "unknown"
+                    // Union element types need parens: (string | null)[], not string | null[].
+                    if (' ' in elem) "($elem)[]" else "$elem[]"
                 }
                 CollectionKind.MAP -> {
-                    val key = (typeArgs.getOrNull(0) as? KmpTypeArg.Invariant)
-                        ?.type?.toTsType(enumNames, dataNames, sealedNames, interfaceNames, abstractNames, wrapperMode) ?: "unknown"
-                    val value = (typeArgs.getOrNull(1) as? KmpTypeArg.Invariant)
-                        ?.type?.toTsType(enumNames, dataNames, sealedNames, interfaceNames, abstractNames, wrapperMode) ?: "unknown"
-                    "{ [key: $key]: $value }"
+                    val key = typeArgs.getOrNull(0)?.typeOrNull()
+                        ?.toTsType(enumNames, dataNames, sealedNames, interfaceNames, abstractNames, wrapperMode) ?: "unknown"
+                    val value = typeArgs.getOrNull(1)?.typeOrNull()
+                        ?.toTsType(enumNames, dataNames, sealedNames, interfaceNames, abstractNames, wrapperMode) ?: "unknown"
+                    // TS index-signature keys must be string | number; everything else
+                    // (star projections, enums-as-keys, unknown) degrades to string.
+                    val safeKey = if (key == "string" || key == "number") key else "string"
+                    "{ [key: $safeKey]: $value }"
                 }
             }
             this is KmpTypeRef.FlowType -> "unknown"

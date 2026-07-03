@@ -157,8 +157,8 @@ object AndroidGenerator {
         // Record class — JS → Kotlin via Expo
         sb.appendLine("class ${decl.name}Record : Record {")
         for (field in decl.fields) {
-            val fieldType = field.type.toRecordFieldType(enumNames, dataClassNames)
-            val default   = field.type.toRecordFieldDefault(enumNames, dataClassNames)
+            val fieldType = field.type.toRecordFieldType(enumNames, dataClassNames, sealedNames)
+            val default   = field.type.toRecordFieldDefault(enumNames, dataClassNames, sealedNames)
             sb.appendLine("    @Field var ${field.name}: $fieldType = $default")
         }
         sb.appendLine("}")
@@ -167,7 +167,7 @@ object AndroidGenerator {
         // toKmp() — Record → Kotlin KMP type
         sb.appendLine("fun ${decl.name}Record.toKmp() = ${decl.name}(")
         for (field in decl.fields) {
-            val conv = field.type.toKmpFieldConversion(field.name, enumNames, dataClassNames)
+            val conv = field.type.toKmpFieldConversion(field.name, enumNames, dataClassNames, sealedNames)
             sb.appendLine("    ${field.name} = $conv,")
         }
         sb.appendLine(")")
@@ -346,6 +346,12 @@ object AndroidGenerator {
         val imports = mutableSetOf<String>()
         if (!isFileScope) imports.add("$kmpPackageName.$name")
         for (eName in usedEnums) imports.add("$kmpPackageName.$eName")
+        // Data/sealed/enum types referenced by function signatures (params or returns) need
+        // imports so the generated Record conversions resolve even across source files.
+        for (fn in functions) {
+            for (p in fn.params) collectClassRefImports(p.type, enumNames, dataClassNames, sealedNames, kmpPackageName, imports)
+            collectClassRefImports(fn.returnType, enumNames, dataClassNames, sealedNames, kmpPackageName, imports)
+        }
         if (hasSuspend) { imports.add("expo.modules.kotlin.Promise"); imports.add("java.util.concurrent.atomic.AtomicBoolean") }
         imports.add("expo.modules.kotlin.modules.Module")
         imports.add("expo.modules.kotlin.modules.ModuleDefinition")
@@ -509,6 +515,12 @@ object AndroidGenerator {
         val imports = mutableSetOf<String>()
         imports.add("$kmpPackageName.$name")
         for (eName in usedEnums) imports.add("$kmpPackageName.$eName")
+        // Data/sealed/enum types referenced by function signatures (params or returns) need
+        // imports so the generated Record conversions resolve even across source files.
+        for (fn in functions) {
+            for (p in fn.params) collectClassRefImports(p.type, enumNames, dataClassNames, sealedNames, kmpPackageName, imports)
+            collectClassRefImports(fn.returnType, enumNames, dataClassNames, sealedNames, kmpPackageName, imports)
+        }
         imports.add("expo.modules.kotlin.modules.Module")
         imports.add("expo.modules.kotlin.modules.ModuleDefinition")
         if (hasSuspend) { imports.add("expo.modules.kotlin.Promise"); imports.add("java.util.concurrent.atomic.AtomicBoolean") }
@@ -617,7 +629,11 @@ object AndroidGenerator {
                     val eventName = "call${fn.name.cap()}"
                     val paramMapEntries = buildString {
                         append(""""instanceId" to instanceId, "callId" to callId""")
-                        for (p in fn.params) append(""", "${p.name}" to ${p.name}""")
+                        for (p in fn.params) {
+                            // Event payloads cross the JS bridge — convert like any other wire value.
+                            val wire = p.type.toJsElemConversion(p.name, enumNames, dataClassNames, sealedNames) ?: p.name
+                            append(""", "${p.name}" to $wire""")
+                        }
                     }
                     val (_, castExpr) = fn.returnType.resolveWireContract(enumNames, dataClassNames, sealedNames)
                     sb.appendLine("        override suspend fun ${fn.name}($pList): $retT {")
@@ -706,8 +722,8 @@ object AndroidGenerator {
             isInstanceBased -> "(instances[instanceId] ?: error(\"Instance not found: \$instanceId\"))"
             else            -> callTarget
         }
-        val ownParams = fn.params.joinToString(", ") { "${it.name}: ${it.type.toBridgeParamType(enumNames, interfaceNames, abstractNames)}" }
-        val callArgs  = fn.params.joinToString(", ") { it.type.toCallArg(it.name, enumNames, interfaceNames, abstractNames) }
+        val ownParams = fn.params.joinToString(", ") { "${it.name}: ${it.type.toBridgeParamType(enumNames, interfaceNames, abstractNames, dataClassNames, sealedNames)}" }
+        val callArgs  = fn.params.joinToString(", ") { it.type.toCallArg(it.name, enumNames, interfaceNames, abstractNames, dataClassNames, sealedNames) }
         sb.append(formatComment(fn.docComment))
         if (!isInstanceBased && fn.params.isEmpty()) {
             sb.appendLine("""    Function("${fn.name}") {""")
@@ -763,10 +779,10 @@ object AndroidGenerator {
         val sb       = StringBuilder()
         val errorTag = "${fn.name.toSnakeUpperCase()}_ERROR"
         val ret      = fn.returnType.toReturnSuffix(enumNames, dataClassNames, sealedNames, interfaceNames, abstractNames)
-        val ownParams = fn.params.map { "${it.name}: ${it.type.toBridgeParamType(enumNames, interfaceNames, abstractNames)}" }
+        val ownParams = fn.params.map { "${it.name}: ${it.type.toBridgeParamType(enumNames, interfaceNames, abstractNames, dataClassNames, sealedNames)}" }
         val allParams = (if (isInstanceBased) listOf("instanceId: String") else emptyList()) + ownParams + listOf("promise: Promise")
         val paramList = allParams.joinToString(", ")
-        val callArgs  = fn.params.joinToString(", ") { it.type.toCallArg(it.name, enumNames, interfaceNames, abstractNames) }
+        val callArgs  = fn.params.joinToString(", ") { it.type.toCallArg(it.name, enumNames, interfaceNames, abstractNames, dataClassNames, sealedNames) }
 
         sb.appendLine("""    AsyncFunction("${fn.name}") { $paramList ->""")
         if (registryName != null) {
@@ -849,16 +865,9 @@ object AndroidGenerator {
         val Cap       = base.cap()
         val eventName = "on${Cap}Update"
         val enumKey   = if (registryName != null) "$registryName.FlowKey.${base.toSnakeUpperCase()}" else "FlowKey.${base.toSnakeUpperCase()}"
-        val retType   = fn.returnType
-        val emit = when {
-            retType is KmpTypeRef.Primitive && retType.kind == PrimitiveKind.CHAR              -> "value.toString()"
-            retType is KmpTypeRef.ClassRef  && retType.simpleName in enumNames                 -> "value.name"
-            retType is KmpTypeRef.ClassRef  && retType.simpleName in dataClassNames            -> "value.toRecord()"
-            retType is KmpTypeRef.ClassRef  && retType.simpleName in sealedNames               -> "value.toRecord()"
-            else -> "value"
-        }
-        val ownParams = fn.params.joinToString(", ") { "${it.name}: ${it.type.toBridgeParamType(enumNames, interfaceNames, abstractNames)}" }
-        val callArgs  = fn.params.joinToString(", ") { it.type.toCallArg(it.name, enumNames, interfaceNames, abstractNames) }
+        val emit = fn.returnType.toJsElemConversion("value", enumNames, dataClassNames, sealedNames) ?: "value"
+        val ownParams = fn.params.joinToString(", ") { "${it.name}: ${it.type.toBridgeParamType(enumNames, interfaceNames, abstractNames, dataClassNames, sealedNames)}" }
+        val callArgs  = fn.params.joinToString(", ") { it.type.toCallArg(it.name, enumNames, interfaceNames, abstractNames, dataClassNames, sealedNames) }
 
         if (registryName != null) {
             val paramList = if (ownParams.isEmpty()) "instanceId: String" else "instanceId: String, $ownParams"
@@ -916,6 +925,117 @@ object AndroidGenerator {
         return sb.toString()
     }
 
+    // ── Element-wise wire conversion (shared by returns, flows, record codecs, events) ──
+
+    /**
+     * The KMP → JS wire conversion for a value expression [v] of this type, or `null` when the
+     * value crosses as-is. Handles enums (`.name`), data/sealed classes (`.toRecord()`), `Char`
+     * (`.toString()`), `Set` (`.toList()` — JS has no Set on the wire), and — recursively —
+     * collections of any of those. When [forRecordField] is set, the numeric widenings required
+     * by generated Record field types (`Long`→`Double`, `Byte`/`Short`→`Int`) apply too.
+     *
+     * Nullability is respected at every level via `?.`.
+     */
+    private fun KmpTypeRef.toJsElemConversion(
+        v: String,
+        enumNames: Set<String>,
+        dataClassNames: Set<String>,
+        sealedNames: Set<String>,
+        forRecordField: Boolean = false,
+        depth: Int = 0,
+    ): String? {
+        val q = if (isNullable) "?" else ""
+        return when {
+            this is KmpTypeRef.Primitive && kind == PrimitiveKind.CHAR -> "$v$q.toString()"
+            forRecordField && this is KmpTypeRef.Primitive && kind == PrimitiveKind.LONG  -> "$v$q.toDouble()"
+            forRecordField && this is KmpTypeRef.Primitive && kind == PrimitiveKind.BYTE  -> "$v$q.toInt()"
+            forRecordField && this is KmpTypeRef.Primitive && kind == PrimitiveKind.SHORT -> "$v$q.toInt()"
+            this is KmpTypeRef.ClassRef && simpleName in enumNames -> "$v$q.name"
+            this is KmpTypeRef.ClassRef && (simpleName in dataClassNames || simpleName in sealedNames) -> "$v$q.toRecord()"
+            this is KmpTypeRef.CollectionType -> {
+                val e = "e$depth"
+                when (kind) {
+                    CollectionKind.LIST -> typeArgs.getOrNull(0)?.typeOrNull()
+                        ?.toJsElemConversion(e, enumNames, dataClassNames, sealedNames, forRecordField, depth + 1)
+                        ?.let { "$v$q.map { $e -> $it }" }
+                    CollectionKind.SET -> {
+                        val inner = typeArgs.getOrNull(0)?.typeOrNull()
+                            ?.toJsElemConversion(e, enumNames, dataClassNames, sealedNames, forRecordField, depth + 1)
+                        if (inner != null) "$v$q.map { $e -> $inner }" else "$v$q.toList()"
+                    }
+                    CollectionKind.MAP -> typeArgs.getOrNull(1)?.typeOrNull()
+                        ?.toJsElemConversion(e, enumNames, dataClassNames, sealedNames, forRecordField, depth + 1)
+                        ?.let { "$v$q.mapValues { (_, $e) -> $it }" }
+                }
+            }
+            else -> null
+        }
+    }
+
+    /**
+     * The JS → KMP conversion for a wire value expression [v] (typed by [toRecordFieldType] /
+     * [toBridgeParamType]), or `null` when the wire value already is the KMP type. Inverse of
+     * [toJsElemConversion]: enum-name `valueOf`, Record `.toKmp()`, `String`→`Char`, numeric
+     * narrowings, `List`→`Set` restoration, and element-wise collection conversion.
+     */
+    private fun KmpTypeRef.toKmpElemConversion(
+        v: String,
+        enumNames: Set<String>,
+        dataClassNames: Set<String>,
+        sealedNames: Set<String>,
+        depth: Int = 0,
+    ): String? {
+        val q = if (isNullable) "?" else ""
+        return when {
+            this is KmpTypeRef.Primitive && kind == PrimitiveKind.CHAR ->
+                if (isNullable) "$v?.firstOrNull()" else "$v.first()"
+            this is KmpTypeRef.Primitive && kind == PrimitiveKind.LONG  -> "$v$q.toLong()"
+            this is KmpTypeRef.Primitive && kind == PrimitiveKind.BYTE  -> "$v$q.toByte()"
+            this is KmpTypeRef.Primitive && kind == PrimitiveKind.SHORT -> "$v$q.toShort()"
+            this is KmpTypeRef.ClassRef && simpleName in enumNames ->
+                if (isNullable) "$v?.let { ${simpleName}.valueOf(it) }" else "${simpleName}.valueOf($v)"
+            this is KmpTypeRef.ClassRef && (simpleName in dataClassNames || simpleName in sealedNames) -> "$v$q.toKmp()"
+            this is KmpTypeRef.CollectionType -> {
+                val e = "e$depth"
+                when (kind) {
+                    CollectionKind.LIST -> typeArgs.getOrNull(0)?.typeOrNull()
+                        ?.toKmpElemConversion(e, enumNames, dataClassNames, sealedNames, depth + 1)
+                        ?.let { "$v$q.map { $e -> $it }" }
+                    CollectionKind.SET -> {
+                        val inner = typeArgs.getOrNull(0)?.typeOrNull()
+                            ?.toKmpElemConversion(e, enumNames, dataClassNames, sealedNames, depth + 1)
+                        if (inner != null) "$v$q.map { $e -> $inner }$q.toSet()" else "$v$q.toSet()"
+                    }
+                    CollectionKind.MAP -> typeArgs.getOrNull(1)?.typeOrNull()
+                        ?.toKmpElemConversion(e, enumNames, dataClassNames, sealedNames, depth + 1)
+                        ?.let { "$v$q.mapValues { (_, $e) -> $it }" }
+                }
+            }
+            else -> null
+        }
+    }
+
+    /**
+     * Wraps a non-identity conversion of a whole value into a `.let { r0 -> ... }` suffix, so
+     * callers can append it to a call/field expression. Returns `""` for identity conversions.
+     */
+    private fun KmpTypeRef.toLetSuffix(conversion: (KmpTypeRef, String) -> String?): String {
+        // The receiver inside .let is non-null even when the reference itself is nullable.
+        val nonNull = withoutNullability()
+        val inner = conversion(nonNull, "r0") ?: return ""
+        return if (isNullable) "?.let { r0 -> $inner }" else ".let { r0 -> $inner }"
+    }
+
+    /** This type reference with `nullable = false`, other properties unchanged. */
+    private fun KmpTypeRef.withoutNullability(): KmpTypeRef = when (this) {
+        is KmpTypeRef.Primitive      -> copy(nullable = false)
+        is KmpTypeRef.UnitType       -> copy(nullable = false)
+        is KmpTypeRef.CollectionType -> copy(nullable = false)
+        is KmpTypeRef.FlowType       -> copy(nullable = false)
+        is KmpTypeRef.ClassRef       -> copy(nullable = false)
+        is KmpTypeRef.TypeParam      -> copy(nullable = false)
+    }
+
     // ── toRecord() assignment helper ──────────────────────────────────────────
 
     /** Produces the RHS expression for `it.fieldName = <expr>` in a `toRecord()` call. */
@@ -938,8 +1058,8 @@ object AndroidGenerator {
             if (nullable) "$fieldName?.name" else "$fieldName.name"
         this is KmpTypeRef.ClassRef && (simpleName in dataClassNames || simpleName in sealedNames) ->
             if (nullable) "$fieldName?.toRecord()" else "$fieldName.toRecord()"
-        this is KmpTypeRef.CollectionType && kind == CollectionKind.SET ->
-            if (nullable) "$fieldName?.toList()" else "$fieldName.toList()"
+        this is KmpTypeRef.CollectionType ->
+            fieldName + toLetSuffix { t, v -> t.toJsElemConversion(v, enumNames, dataClassNames, sealedNames, forRecordField = true, depth = 1) }
         else -> fieldName
     }
 
@@ -950,46 +1070,14 @@ object AndroidGenerator {
      *
      * Every field in a sealed Record is nullable regardless of the original field's
      * nullability, since a given field is only populated for the variant(s) that declare it —
-     * see [generateSealedCodec].
+     * see [generateSealedCodec]. Delegates to [toRecordFieldType] so sealed-record fields use
+     * exactly the same wire types as data-class Record fields.
      */
     private fun KmpTypeRef.toSealedRecordFieldType(
         enumNames: Set<String>,
         dataClassNames: Set<String>,
         sealedNames: Set<String>,
-    ): String = when {
-        this is KmpTypeRef.Primitive -> when (kind) {
-            PrimitiveKind.STRING  -> "String?"
-            PrimitiveKind.INT     -> "Int?"
-            PrimitiveKind.LONG    -> "Double?"
-            PrimitiveKind.DOUBLE  -> "Double?"
-            PrimitiveKind.FLOAT   -> "Float?"
-            PrimitiveKind.BOOLEAN -> "Boolean?"
-            PrimitiveKind.BYTE    -> "Byte?"
-            PrimitiveKind.SHORT   -> "Short?"
-            PrimitiveKind.CHAR    -> "String?"
-        }
-        this is KmpTypeRef.ClassRef && simpleName in enumNames                                    -> "String?"
-        this is KmpTypeRef.ClassRef && (simpleName in dataClassNames || simpleName in sealedNames) -> "${simpleName}Record?"
-        this is KmpTypeRef.ClassRef -> "Any?"
-        this is KmpTypeRef.CollectionType -> {
-            val inner = when (kind) {
-                CollectionKind.LIST, CollectionKind.SET -> {
-                    val elem = (typeArgs.firstOrNull() as? KmpTypeArg.Invariant)
-                        ?.type?.toRecordFieldType(enumNames, dataClassNames) ?: "Any?"
-                    "List<${elem.trimEnd('?')}>"
-                }
-                CollectionKind.MAP -> {
-                    val k = (typeArgs.getOrNull(0) as? KmpTypeArg.Invariant)
-                        ?.type?.toRecordFieldType(enumNames, dataClassNames) ?: "Any"
-                    val v = (typeArgs.getOrNull(1) as? KmpTypeArg.Invariant)
-                        ?.type?.toRecordFieldType(enumNames, dataClassNames) ?: "Any?"
-                    "Map<${k.trimEnd('?')}, ${v.trimEnd('?')}>"
-                }
-            }
-            "$inner?"
-        }
-        else -> "Any?"
-    }
+    ): String = toRecordFieldType(enumNames, dataClassNames, sealedNames).trimEnd('?') + "?"
 
     // ── Extract from nullable sealed Record field → KMP type ──────────────────
 
@@ -1008,12 +1096,9 @@ object AndroidGenerator {
         dataClassNames: Set<String>,
         sealedNames: Set<String>,
     ): String {
-        // Char is bridged as String — handle before the nullable pass-through
-        if (this is KmpTypeRef.Primitive && kind == PrimitiveKind.CHAR) {
-            return if (nullable) "$fieldName?.firstOrNull()" else "($fieldName ?: \"\").first()"
-        }
-        // If the original KMP field is nullable, the Record field is also nullable — pass through
-        if (isNullable) return fieldName
+        // Original nullable → the Record field is nullable too; convert with ?-chaining
+        // (identical to a nullable data-class Record field).
+        if (isNullable) return toKmpFieldConversion(fieldName, enumNames, dataClassNames, sealedNames)
         return when {
             this is KmpTypeRef.Primitive -> when (kind) {
                 PrimitiveKind.STRING  -> "$fieldName ?: \"\""
@@ -1022,20 +1107,20 @@ object AndroidGenerator {
                 PrimitiveKind.DOUBLE  -> "$fieldName ?: 0.0"
                 PrimitiveKind.FLOAT   -> "$fieldName ?: 0f"
                 PrimitiveKind.BOOLEAN -> "$fieldName ?: false"
-                PrimitiveKind.BYTE    -> "$fieldName ?: 0"
-                PrimitiveKind.SHORT   -> "$fieldName ?: 0"
-                PrimitiveKind.CHAR    -> "$fieldName ?: ' '" // unreachable — handled above
+                PrimitiveKind.BYTE    -> "$fieldName?.toByte() ?: 0"
+                PrimitiveKind.SHORT   -> "$fieldName?.toShort() ?: 0"
+                PrimitiveKind.CHAR    -> "($fieldName ?: \"\").firstOrNull() ?: ' '"
             }
             this is KmpTypeRef.ClassRef && simpleName in enumNames ->
                 "$simpleName.valueOf($fieldName ?: \"\")"
             this is KmpTypeRef.ClassRef && (simpleName in dataClassNames || simpleName in sealedNames) ->
                 "($fieldName ?: ${simpleName}Record()).toKmp()"
-            this is KmpTypeRef.CollectionType && kind == CollectionKind.LIST ->
-                "$fieldName ?: emptyList()"
-            this is KmpTypeRef.CollectionType && kind == CollectionKind.SET ->
-                "($fieldName ?: emptyList()).toSet()"
-            this is KmpTypeRef.CollectionType && kind == CollectionKind.MAP ->
-                "$fieldName ?: emptyMap()"
+            this is KmpTypeRef.CollectionType -> {
+                val fallback = if (kind == CollectionKind.MAP) "emptyMap()" else "emptyList()"
+                val inner = withoutNullability().toKmpElemConversion("r0", enumNames, dataClassNames, sealedNames, depth = 1)
+                if (inner == null) "$fieldName ?: $fallback"
+                else "($fieldName ?: $fallback).let { r0 -> $inner }"
+            }
             else -> "$fieldName ?: null"
         }
     }
@@ -1073,7 +1158,11 @@ object AndroidGenerator {
      * class's Expo `Record` (not the sealed-class flat Record — see [toSealedRecordFieldType]
      * for that variant).
      */
-    private fun KmpTypeRef.toRecordFieldType(enumNames: Set<String>, dataClassNames: Set<String>): String {
+    private fun KmpTypeRef.toRecordFieldType(
+        enumNames: Set<String>,
+        dataClassNames: Set<String>,
+        sealedNames: Set<String> = emptySet(),
+    ): String {
         val q = if (isNullable) "?" else ""
         return when {
             this is KmpTypeRef.Primitive -> when (kind) {
@@ -1088,20 +1177,21 @@ object AndroidGenerator {
                 PrimitiveKind.CHAR    -> "String"
             } + q
             this is KmpTypeRef.ClassRef && simpleName in enumNames      -> "String$q"
-            this is KmpTypeRef.ClassRef && simpleName in dataClassNames -> "${simpleName}Record$q"
+            this is KmpTypeRef.ClassRef && (simpleName in dataClassNames || simpleName in sealedNames) -> "${simpleName}Record$q"
             this is KmpTypeRef.ClassRef                                 -> "Any?"
             this is KmpTypeRef.CollectionType -> {
+                // Sets cross the wire as JS arrays — the wire type is always List.
                 val inner = when (kind) {
                     CollectionKind.LIST, CollectionKind.SET -> {
-                        val elem = (typeArgs.firstOrNull() as? KmpTypeArg.Invariant)
-                            ?.type?.toRecordFieldType(enumNames, dataClassNames) ?: "Any?"
+                        val elem = typeArgs.getOrNull(0)?.typeOrNull()
+                            ?.toRecordFieldType(enumNames, dataClassNames, sealedNames) ?: "Any?"
                         "List<$elem>"
                     }
                     CollectionKind.MAP -> {
-                        val key = (typeArgs.getOrNull(0) as? KmpTypeArg.Invariant)
-                            ?.type?.toRecordFieldType(enumNames, dataClassNames) ?: "Any?"
-                        val value = (typeArgs.getOrNull(1) as? KmpTypeArg.Invariant)
-                            ?.type?.toRecordFieldType(enumNames, dataClassNames) ?: "Any?"
+                        val key = typeArgs.getOrNull(0)?.typeOrNull()
+                            ?.toRecordFieldType(enumNames, dataClassNames, sealedNames) ?: "Any?"
+                        val value = typeArgs.getOrNull(1)?.typeOrNull()
+                            ?.toRecordFieldType(enumNames, dataClassNames, sealedNames) ?: "Any?"
                         "Map<$key, $value>"
                     }
                 }
@@ -1120,7 +1210,11 @@ object AndroidGenerator {
      * fields get a type-appropriate zero value (`""`, `0`, `false`, `emptyList()`, a fresh nested
      * `Record()`, ...).
      */
-    private fun KmpTypeRef.toRecordFieldDefault(enumNames: Set<String>, dataClassNames: Set<String>): String {
+    private fun KmpTypeRef.toRecordFieldDefault(
+        enumNames: Set<String>,
+        dataClassNames: Set<String>,
+        sealedNames: Set<String> = emptySet(),
+    ): String {
         if (isNullable) return "null"
         return when {
             this is KmpTypeRef.Primitive -> when (kind) {
@@ -1133,7 +1227,7 @@ object AndroidGenerator {
                 PrimitiveKind.CHAR    -> "\"\""
             }
             this is KmpTypeRef.ClassRef && simpleName in enumNames      -> "\"\""
-            this is KmpTypeRef.ClassRef && simpleName in dataClassNames -> "${simpleName}Record()"
+            this is KmpTypeRef.ClassRef && (simpleName in dataClassNames || simpleName in sealedNames) -> "${simpleName}Record()"
             this is KmpTypeRef.ClassRef                                 -> "null"
             this is KmpTypeRef.CollectionType -> when (kind) {
                 CollectionKind.MAP -> "emptyMap()"
@@ -1148,14 +1242,14 @@ object AndroidGenerator {
      * field type inside `toKmp()`.
      *
      * Handles the primitive widenings JS requires (`Long`→`Double`, `Byte`/`Short`→`Int` on the
-     * wire, `Char`→`String`), enum name lookups, nested data-class conversion, and element-wise
-     * conversion for collections whose elements themselves need one of those conversions (see
-     * [needsConversion] / [singleElemConversion]).
+     * wire, `Char`→`String`), enum name lookups, nested data/sealed-class conversion, and —
+     * via [toKmpElemConversion] — element-wise conversion for collections at any nesting depth.
      */
     private fun KmpTypeRef.toKmpFieldConversion(
         fieldName: String,
         enumNames: Set<String>,
         dataClassNames: Set<String>,
+        sealedNames: Set<String> = emptySet(),
     ): String = when {
         this is KmpTypeRef.Primitive && kind == PrimitiveKind.LONG ->
             if (nullable) "$fieldName?.toLong()" else "$fieldName.toLong()"
@@ -1168,65 +1262,11 @@ object AndroidGenerator {
         this is KmpTypeRef.ClassRef && simpleName in enumNames ->
             if (nullable) "$fieldName?.let { ${simpleName}.valueOf(it) }"
             else "${simpleName}.valueOf($fieldName)"
-        this is KmpTypeRef.ClassRef && simpleName in dataClassNames ->
+        this is KmpTypeRef.ClassRef && (simpleName in dataClassNames || simpleName in sealedNames) ->
             if (nullable) "$fieldName?.toKmp()" else "$fieldName.toKmp()"
-        this is KmpTypeRef.CollectionType && kind == CollectionKind.SET -> {
-            val elemArg  = (typeArgs.firstOrNull() as? KmpTypeArg.Invariant)?.type
-            val needsMap = elemArg != null && elemArg.needsConversion(enumNames, dataClassNames)
-            val conv     = if (needsMap) ".map { ${elemArg!!.singleElemConversion(enumNames, dataClassNames)} }.toSet()" else ".toSet()"
-            if (nullable) "$fieldName?.let { it$conv }" else "$fieldName$conv"
-        }
-        this is KmpTypeRef.CollectionType && kind == CollectionKind.LIST -> {
-            val elemArg  = (typeArgs.firstOrNull() as? KmpTypeArg.Invariant)?.type
-            val needsMap = elemArg != null && elemArg.needsConversion(enumNames, dataClassNames)
-            if (!needsMap) fieldName
-            else {
-                val conv = elemArg!!.singleElemConversion(enumNames, dataClassNames)
-                if (nullable) "$fieldName?.map { $conv }" else "$fieldName.map { $conv }"
-            }
-        }
-        this is KmpTypeRef.CollectionType && kind == CollectionKind.MAP -> {
-            val valArg   = (typeArgs.getOrNull(1) as? KmpTypeArg.Invariant)?.type
-            val needsMap = valArg != null && valArg.needsConversion(enumNames, dataClassNames)
-            if (!needsMap) fieldName
-            else {
-                val conv = valArg!!.singleElemConversion(enumNames, dataClassNames, "v")
-                if (nullable) "$fieldName?.mapValues { (_, v) -> $conv }"
-                else "$fieldName.mapValues { (_, v) -> $conv }"
-            }
-        }
+        this is KmpTypeRef.CollectionType ->
+            fieldName + toLetSuffix { t, v -> t.toKmpElemConversion(v, enumNames, dataClassNames, sealedNames, depth = 1) }
         else -> fieldName
-    }
-
-    /**
-     * Whether a collection element of this type requires per-element conversion in
-     * [toKmpFieldConversion] — i.e. it's a `Long`, an enum, or a nested data class, rather than
-     * already being wire-compatible as-is.
-     */
-    private fun KmpTypeRef.needsConversion(enumNames: Set<String>, dataClassNames: Set<String>): Boolean = when {
-        this is KmpTypeRef.Primitive && kind == PrimitiveKind.LONG -> true
-        this is KmpTypeRef.ClassRef  && simpleName in enumNames    -> true
-        this is KmpTypeRef.ClassRef  && simpleName in dataClassNames -> true
-        else -> false
-    }
-
-    /**
-     * The single-element conversion expression used inside a `.map { ... }` /
-     * `.mapValues { ... }` when a collection's element type [needsConversion].
-     *
-     * @param elemVar the loop variable name the conversion expression should reference (defaults
-     *        to Kotlin's implicit `it`; callers pass an explicit name like `v` when both a key
-     *        and a value are in scope).
-     */
-    private fun KmpTypeRef.singleElemConversion(
-        enumNames: Set<String>,
-        dataClassNames: Set<String>,
-        elemVar: String = "it",
-    ): String = when {
-        this is KmpTypeRef.Primitive && kind == PrimitiveKind.LONG -> "$elemVar.toLong()"
-        this is KmpTypeRef.ClassRef  && simpleName in enumNames    -> "${simpleName}.valueOf($elemVar)"
-        this is KmpTypeRef.ClassRef  && simpleName in dataClassNames -> "$elemVar.toKmp()"
-        else -> elemVar
     }
 
     /**
@@ -1266,10 +1306,10 @@ object AndroidGenerator {
      * The suffix appended to a KMP function call expression to convert its Kotlin return value
      * into a bridge-safe value.
      *
-     * Enums become `.name`, data/sealed classes become `.toRecord()`, and interface/abstract
-     * class return values are registered in their `<Name>Registry` and returned as an opaque
-     * instance id string via `.let { ... }`. Anything else (primitives, collections, `Unit`)
-     * crosses as-is, so this returns `""`.
+     * Enums become `.name`, data/sealed classes become `.toRecord()`, interface/abstract class
+     * return values are registered in their `<Name>Registry` and returned as an opaque instance
+     * id string via `.let { ... }`, and collections convert element-wise (see
+     * [toJsElemConversion]). Plain primitives and `Unit` cross as-is, so this returns `""`.
      */
     private fun KmpTypeRef.toReturnSuffix(
         enumNames: Set<String>,
@@ -1286,6 +1326,8 @@ object AndroidGenerator {
             if (nullable) "?.let { ${simpleName}Registry.register(it) }" else ".let { ${simpleName}Registry.register(it) }"
         this is KmpTypeRef.ClassRef && simpleName in abstractNames  ->
             if (nullable) "?.let { ${simpleName}Registry.register(it) }" else ".let { ${simpleName}Registry.register(it) }"
+        this is KmpTypeRef.CollectionType ->
+            toLetSuffix { t, v -> t.toJsElemConversion(v, enumNames, dataClassNames, sealedNames, depth = 1) }
         else -> ""
     }
 
@@ -1326,14 +1368,17 @@ object AndroidGenerator {
      * parameter of this KMP type.
      *
      * Enums, interfaces, and abstract classes all cross the bridge as a `String` (an enum case
-     * name or a registry instance id); `Long` arrives as a JS `number`, i.e. `Double`; `Char`
-     * arrives as a single-character `String`. Everything else keeps its natural Kotlin type via
-     * [toKotlinTypeName].
+     * name or a registry instance id); data/sealed classes as their `<Name>Record` wire type;
+     * `Long` arrives as a JS `number`, i.e. `Double`; `Char` arrives as a single-character
+     * `String`; collections use their Record wire types element-wise (see [toRecordFieldType]).
+     * Everything else keeps its natural Kotlin type via [toKotlinTypeName].
      */
     private fun KmpTypeRef.toBridgeParamType(
         enumNames: Set<String>,
         interfaceNames: Set<String> = emptySet(),
         abstractNames: Set<String> = emptySet(),
+        dataClassNames: Set<String> = emptySet(),
+        sealedNames: Set<String> = emptySet(),
     ): String = when {
         this is KmpTypeRef.ClassRef && simpleName in enumNames ->
             if (nullable) "String?" else "String"
@@ -1341,10 +1386,14 @@ object AndroidGenerator {
             if (nullable) "String?" else "String"
         this is KmpTypeRef.ClassRef && simpleName in abstractNames ->
             if (nullable) "String?" else "String"
+        this is KmpTypeRef.ClassRef && (simpleName in dataClassNames || simpleName in sealedNames) ->
+            if (nullable) "${simpleName}Record?" else "${simpleName}Record"
         this is KmpTypeRef.Primitive && kind == PrimitiveKind.LONG ->
             if (nullable) "Double?" else "Double"
         this is KmpTypeRef.Primitive && kind == PrimitiveKind.CHAR ->
             if (nullable) "String?" else "String"
+        this is KmpTypeRef.CollectionType ->
+            toRecordFieldType(enumNames, dataClassNames, sealedNames)
         else -> toKotlinTypeName()
     }
 
@@ -1352,8 +1401,8 @@ object AndroidGenerator {
      * The expression that converts a bridge parameter (as typed by [toBridgeParamType]) back
      * into the real KMP type expected by the underlying function call.
      *
-     * Mirrors [toBridgeParamType]: reverses the enum-name / registry-id / numeric-widening
-     * conversions applied on the way in.
+     * Mirrors [toBridgeParamType]: reverses the enum-name / registry-id / Record / collection /
+     * numeric-widening conversions applied on the way in.
      *
      * @param paramName the generated parameter's identifier in the emitted lambda.
      */
@@ -1362,6 +1411,8 @@ object AndroidGenerator {
         enumNames: Set<String>,
         interfaceNames: Set<String> = emptySet(),
         abstractNames: Set<String> = emptySet(),
+        dataClassNames: Set<String> = emptySet(),
+        sealedNames: Set<String> = emptySet(),
     ): String = when {
         this is KmpTypeRef.ClassRef && simpleName in enumNames ->
             if (nullable) "$paramName?.let { ${simpleName}.valueOf(it) }"
@@ -1372,10 +1423,14 @@ object AndroidGenerator {
         this is KmpTypeRef.ClassRef && simpleName in abstractNames ->
             if (nullable) "$paramName?.let { ${simpleName}Registry.get(it).instance }"
             else "${simpleName}Registry.get($paramName).instance"
+        this is KmpTypeRef.ClassRef && (simpleName in dataClassNames || simpleName in sealedNames) ->
+            if (nullable) "$paramName?.toKmp()" else "$paramName.toKmp()"
         this is KmpTypeRef.Primitive && kind == PrimitiveKind.LONG ->
             if (nullable) "$paramName?.toLong()" else "$paramName.toLong()"
         this is KmpTypeRef.Primitive && kind == PrimitiveKind.CHAR ->
             if (nullable) "$paramName?.firstOrNull()" else "$paramName.first()"
+        this is KmpTypeRef.CollectionType ->
+            paramName + toLetSuffix { t, v -> t.toKmpElemConversion(v, enumNames, dataClassNames, sealedNames, depth = 1) }
         else -> paramName
     }
 

@@ -538,6 +538,20 @@ enum class PrimitiveKind {
 }
 
 /**
+ * The projected type of this argument regardless of variance, or `null` for a star projection.
+ *
+ * Variance (`in`/`out`) never changes what value actually crosses the bridge, so generators
+ * should use this instead of matching only [KmpTypeArg.Invariant] — otherwise `List<out User>`
+ * silently degrades to `Any?`/`unknown`.
+ */
+fun KmpTypeArg.typeOrNull(): KmpTypeRef? = when (this) {
+    is KmpTypeArg.Invariant     -> type
+    is KmpTypeArg.Covariant     -> type
+    is KmpTypeArg.Contravariant -> type
+    KmpTypeArg.Star             -> null
+}
+
+/**
  * Whether a JS implementation of this interface/abstract class can be generated: the platform
  * bridge creates an anonymous subtype overriding every member, which is only possible when the
  * type has no abstract properties, and — for an abstract class — a zero-arg constructor and no

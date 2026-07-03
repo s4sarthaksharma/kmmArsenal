@@ -45,6 +45,15 @@ data class FixtureUser(
     val aliases: Set<String>,           // CollectionType SET
 )
 
+/** Data class with collection-of-record fields — element-wise codec conversion required. */
+data class FixtureTeam(
+    val name: String,
+    val members: List<FixtureUser>,          // List of data classes
+    val leads: Map<String, FixtureUser>,     // Map with data-class values
+    val states: List<FixtureStatus>,         // List of enums
+    val charter: Set<String>,                // Set crosses as a JS array
+)
+
 // ── Sealed class — all three variant kinds ────────────────────────────────────
 
 /**
@@ -297,6 +306,22 @@ class FixtureAsyncApi {
             delay(2_000)
         }
     }
+}
+
+// ── Concrete class — data/sealed/collection function parameters ───────────────
+
+class FixtureParamsApi {
+    fun saveUser(user: FixtureUser): FixtureUser = user
+    fun saveNullableUser(user: FixtureUser?): String = user?.id ?: "null-user"
+    fun describeResult(result: FixtureResult): String = when (result) {
+        is FixtureResult.Success -> "success:${result.code}"
+        is FixtureResult.Empty   -> "empty"
+        is FixtureResult.Failure -> "failure:${result.message}"
+        is FixtureResult.Partial -> "partial:${result.hint}"
+    }
+    fun saveAll(users: List<FixtureUser>): Int = users.size
+    fun saveTeam(team: FixtureTeam): FixtureTeam = team
+    fun tagUsers(usersByTag: Map<String, FixtureUser>): List<String> = usersByTag.keys.toList()
 }
 
 // ── Generic class — TypeParam in model ────────────────────────────────────────
