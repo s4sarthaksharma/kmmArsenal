@@ -319,6 +319,11 @@ val fixtureNullableUser: FixtureUser? = null
 
 // ── File-level functions ──────────────────────────────────────────────────────
 
+/** Typealias in a signature must resolve to its expansion (String), not the alias name. */
+typealias FixtureUserId = String
+
+fun fixtureEchoUserId(id: FixtureUserId): FixtureUserId = id
+
 fun fixtureGreet(name: String): String = "Hello, $name"
 fun fixtureAdd(a: Int, b: Int): Int = a + b
 fun fixtureNullableEcho(value: String?): String? = value

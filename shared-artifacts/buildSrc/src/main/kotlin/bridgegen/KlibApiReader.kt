@@ -23,7 +23,8 @@ import java.io.File
  * - `StateFlow`, `SharedFlow`, `MutableStateFlow`, `MutableSharedFlow` → [KmpTypeRef.FlowType]
  * - `MutableList`, `MutableMap`, `MutableSet` → their read-only [CollectionKind] equivalents
  * - `suspend fun` returning `Flow<T>` → [FunctionKind.FLOW], `suspend` modifier discarded
- * - Type aliases → resolved to the underlying expanded type
+ * - Type aliases → resolved to the underlying expanded type (the klib stores the expansion;
+ *   the alias name is not preserved in the model)
  * - Non-public declarations, annotation classes, and generated data-class methods are excluded
  */
 object KlibApiReader {
@@ -448,13 +449,8 @@ object KlibApiReader {
     ): KmpTypeRef {
         val nullable = type.nullable
 
-        // Type alias — use the expanded (underlying) type
-        if (type.hasAbbreviatedType()) {
-            return readTypeRef(
-                if (type.hasAbbreviatedType()) type.abbreviatedType else type,
-                nr, tt, typeParams,
-            )
-        }
+        // Type aliases need no handling: the serialized type is already the expanded
+        // (underlying) type — `abbreviatedType` only records the alias as written in source.
 
         // Generic type parameter (e.g. T, K, V)
         if (type.hasTypeParameter()) {
