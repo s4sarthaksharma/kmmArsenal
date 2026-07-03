@@ -394,15 +394,7 @@ object KlibApiReader {
         val returnTypeRef = resolveReturnType(func, nr, tt, typeParams)
 
         val (kind, effectiveReturn) = when {
-            returnTypeRef is KmpTypeRef.FlowType -> {
-                val element = when (val arg = returnTypeRef.typeArg) {
-                    is KmpTypeArg.Invariant     -> arg.type
-                    is KmpTypeArg.Covariant     -> arg.type
-                    is KmpTypeArg.Contravariant -> arg.type
-                    KmpTypeArg.Star             -> KmpTypeRef.Primitive(PrimitiveKind.STRING)
-                }
-                FunctionKind.FLOW to element
-            }
+            returnTypeRef is KmpTypeRef.FlowType -> FunctionKind.FLOW to unwrapFlowElement(returnTypeRef)
             isSuspend -> FunctionKind.SUSPEND to returnTypeRef
             else      -> FunctionKind.SYNC    to returnTypeRef
         }
@@ -424,10 +416,13 @@ object KlibApiReader {
     }
 
     /**
-     * Reads one top-level `val`/`var` property as a synthetic zero-parameter
-     * [FunctionKind.SYNC] [KmpFunction] with [KmpFunction.isPropertyGetter] set, so generators
-     * can emit it as a plain property read (e.g. `Foo.bar`) rather than a function call
-     * (`Foo.bar()`).
+     * Reads one top-level `val`/`var` property as a synthetic zero-parameter [KmpFunction] with
+     * [KmpFunction.isPropertyGetter] set, so generators can emit it as a plain property read
+     * (e.g. `Foo.bar`) rather than a function call (`Foo.bar()`).
+     *
+     * A `Flow`-typed property is classified as [FunctionKind.FLOW] with the unwrapped element
+     * type (exactly like a `Flow`-returning function), so it gets the start/stop/listener
+     * bridge surface; everything else is [FunctionKind.SYNC].
      *
      * Only used for file-scope (top-level) properties — member properties on classes/objects
      * are not currently read at all (see the `propertyList` limitation noted in the Android
@@ -444,14 +439,21 @@ object KlibApiReader {
         val name = nr.getString(prop.name)
         val returnTypeProto = if (prop.hasReturnType()) prop.returnType else tt[prop.returnTypeId]
         val typeRef = readTypeRef(returnTypeProto, nr, tt, emptyList())
+        val (kind, effectiveType) =
+            if (typeRef is KmpTypeRef.FlowType) FunctionKind.FLOW to unwrapFlowElement(typeRef)
+            else FunctionKind.SYNC to typeRef
         return KmpFunction(
             name            = name,
-            kind            = FunctionKind.SYNC,
+            kind            = kind,
             params          = emptyList(),
-            returnType      = typeRef,
+            returnType      = effectiveType,
             isPropertyGetter = true,
         )
     }
+
+    /** The element type `T` of a `Flow<T>` reference; star projections fall back to `String`. */
+    private fun unwrapFlowElement(flow: KmpTypeRef.FlowType): KmpTypeRef =
+        flow.typeArg.typeOrNull() ?: KmpTypeRef.Primitive(PrimitiveKind.STRING)
 
     // ── Field reading ─────────────────────────────────────────────────────────
 

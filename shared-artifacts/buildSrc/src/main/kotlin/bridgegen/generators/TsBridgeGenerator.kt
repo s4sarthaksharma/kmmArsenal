@@ -308,10 +308,6 @@ object TsBridgeGenerator {
             onSkip("FUNCTION SKIPPED: $moduleName.${fn.name}() — Map with non-String keys is not bridgeable (JS objects are string-keyed).")
             return
         }
-        if (fn.isPropertyGetter && fn.returnType is KmpTypeRef.FlowType) {
-            onSkip("FUNCTION SKIPPED: $moduleName.${fn.name} — Flow-typed properties have no start/stop bridge surface yet.")
-            return
-        }
         val native = "_$moduleName"
         when (fn.kind) {
             FunctionKind.SYNC -> {
@@ -407,10 +403,6 @@ object TsBridgeGenerator {
     ) {
         if (fn.usesNonStringKeyMap()) {
             onSkip("FUNCTION SKIPPED: $moduleName.${fn.name}() — Map with non-String keys is not bridgeable (JS objects are string-keyed).")
-            return
-        }
-        if (fn.isPropertyGetter && fn.returnType is KmpTypeRef.FlowType) {
-            onSkip("FUNCTION SKIPPED: $moduleName.${fn.name} — Flow-typed properties have no start/stop bridge surface yet.")
             return
         }
         val native = "_$moduleName"

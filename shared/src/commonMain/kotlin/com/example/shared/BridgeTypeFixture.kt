@@ -382,7 +382,7 @@ var fixtureMutableCounter: Int = 0
 val fixtureActiveStatus: FixtureStatus = FixtureStatus.ACTIVE
 val fixtureNullableUser: FixtureUser? = null
 
-/** Flow-typed property — must be skipped loudly (no start/stop surface for property flows). */
+/** Flow-typed property — bridged like a Flow function: start/stop/listener triplet. */
 val fixtureCounterStream: Flow<Int> = flow {
     var i = 0
     while (true) { emit(i++); delay(1_000) }

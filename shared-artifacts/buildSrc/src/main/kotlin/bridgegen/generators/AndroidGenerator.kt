@@ -720,11 +720,6 @@ object AndroidGenerator {
             onSkip(msg)
             return "    // $msg\n"
         }
-        if (fn.isPropertyGetter && fn.returnType is KmpTypeRef.FlowType) {
-            val msg = "BRIDGE SKIPPED: ${fn.name} — Flow-typed properties have no start/stop bridge surface yet."
-            onSkip(msg)
-            return "    // $msg\n"
-        }
         val sb  = StringBuilder()
         val ret = fn.returnType.toReturnSuffix(enumNames, dataClassNames, sealedNames, interfaceNames, abstractNames)
         val instanceExpr = when {
@@ -888,6 +883,8 @@ object AndroidGenerator {
         val emit = fn.returnType.toJsElemConversion("value", enumNames, dataClassNames, sealedNames) ?: "value"
         val ownParams = fn.params.joinToString(", ") { "${it.name}: ${it.type.toBridgeParamType(enumNames, interfaceNames, abstractNames, dataClassNames, sealedNames)}" }
         val callArgs  = fn.params.joinToString(", ") { it.type.toCallArg(it.name, enumNames, interfaceNames, abstractNames, dataClassNames, sealedNames) }
+        // A Flow-typed property is read as a property access, not a call.
+        val invoke    = if (fn.isPropertyGetter) "" else "($callArgs)"
 
         if (registryName != null) {
             val paramList = if (ownParams.isEmpty()) "instanceId: String" else "instanceId: String, $ownParams"
@@ -895,7 +892,7 @@ object AndroidGenerator {
             sb.appendLine("      val holder = $registryName.get(instanceId)")
             sb.appendLine("      holder.flowJobs[$enumKey]?.cancel()")
             sb.appendLine("      holder.flowJobs[$enumKey] = holder.scope.launch {")
-            sb.appendLine("        holder.instance.${fn.name}($callArgs).collect { value ->")
+            sb.appendLine("        holder.instance.${fn.name}$invoke.collect { value ->")
             sb.appendLine("""          sendEvent("$eventName", mapOf("instanceId" to instanceId, "value" to $emit))""")
             sb.appendLine("        }")
             sb.appendLine("      }")
@@ -912,7 +909,7 @@ object AndroidGenerator {
             sb.appendLine("      val holder = instances[instanceId] ?: error(\"Instance not found: \$instanceId\")")
             sb.appendLine("      holder.flowJobs[$enumKey]?.cancel()")
             sb.appendLine("      holder.flowJobs[$enumKey] = holder.scope.launch {")
-            sb.appendLine("        holder.instance.${fn.name}($callArgs).collect { value ->")
+            sb.appendLine("        holder.instance.${fn.name}$invoke.collect { value ->")
             sb.appendLine("""          sendEvent("$eventName", mapOf("instanceId" to instanceId, "value" to $emit))""")
             sb.appendLine("        }")
             sb.appendLine("      }")
@@ -931,7 +928,7 @@ object AndroidGenerator {
             }
             sb.appendLine("      flowJobs[$enumKey]?.cancel()")
             sb.appendLine("      flowJobs[$enumKey] = scope.launch {")
-            sb.appendLine("        $callTarget.${fn.name}($callArgs).collect { value ->")
+            sb.appendLine("        $callTarget.${fn.name}$invoke.collect { value ->")
             sb.appendLine("""          sendEvent("$eventName", mapOf("value" to $emit))""")
             sb.appendLine("        }")
             sb.appendLine("      }")
