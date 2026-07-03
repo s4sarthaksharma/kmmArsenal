@@ -360,3 +360,33 @@ fun fixtureObserveNullableString(): Flow<String?> = flow {
     var i = 0
     while (true) { emit(if (i % 2 == 0) "value_$i" else null); i++; delay(1_000) }
 }
+
+// ── Interface/abstract return type fixture ─────────────────────────────────
+
+class FixtureInterfaceApi {
+
+    fun getRepository(): FixtureRepository = object : FixtureRepository {
+        override fun findById(id: String): FixtureUser = FixtureUser(
+            id = id, age = 25, score = 9.0, active = true, byteFlag = 1, longId = 100L,
+            initial = 'R', ratio = 0.5f, status = FixtureStatus.ACTIVE, address = null,
+            tags = listOf("repo"), metadata = mapOf("version" to 1), aliases = emptySet(),
+        )
+        override suspend fun fetchById(id: String): FixtureUser = findById(id)
+        override fun observeAll(): Flow<List<FixtureUser>> = flow { emit(listOf(findById("all"))) }
+    }
+
+    fun getNullableRepository(): FixtureRepository? = null
+
+    suspend fun fetchRepository(id: String): FixtureRepository = getRepository()
+
+    fun getProcessor(): FixtureBaseProcessor = object : FixtureBaseProcessor() {
+        override fun process(input: String): String = "processed:$input"
+        override suspend fun processAsync(input: String): String = "async:$input"
+    }
+
+    fun processRepo(repo: FixtureRepository): String = repo.findById("fixture-param").id
+    fun processNullableRepo(repo: FixtureRepository?): String =
+        repo?.findById("fixture-nullable")?.id ?: "null-repo"
+    suspend fun fetchFromRepo(repo: FixtureRepository, id: String): FixtureUser = repo.fetchById(id)
+    fun processProcessor(processor: FixtureBaseProcessor): String = processor.process("hello")
+}

@@ -28,7 +28,10 @@ import java.io.File
  */
 object KlibApiReader {
 
+    /** Compiler-synthesized `data class` member names that are never meaningful to bridge. */
     private val SKIP_FUNCTION_NAMES = setOf("hashCode", "equals", "toString", "copy")
+
+    /** Matches synthesized `componentN()` destructuring functions on data classes, to exclude them. */
     private val COMPONENT_REGEX = Regex("^component\\d+$")
 
     /** Regex that matches the simple name of any top-level class/interface/object declaration. */
@@ -41,6 +44,10 @@ object KlibApiReader {
         """^\s*(?:public\s+)?(?:suspend\s+)?(?:fun|val|var)\s+(\w+)"""
     )
 
+    /**
+     * One `class`/`interface`/`object` declaration read from klib metadata, paired with the
+     * [NameResolverImpl] needed to resolve string/class-id references within it.
+     */
     private data class ClassEntry(
         val cls: ProtoBuf.Class,
         val nr: NameResolverImpl,
@@ -51,6 +58,10 @@ object KlibApiReader {
         )
     }
 
+    /**
+     * Top-level (file-scope) functions and properties from one package fragment, paired with
+     * the resolver/type-table needed to read them.
+     */
     private data class TopLevelEntry(
         val functions: List<ProtoBuf.Function>,
         val properties: List<ProtoBuf.Property>,
@@ -58,6 +69,10 @@ object KlibApiReader {
         val tt: TypeTable,
     )
 
+    /**
+     * Everything read from klib parts sharing one part name — accumulates across all package
+     * fragments that map to the same part before being resolved into a single [KmpSourceFile].
+     */
     private data class PartData(
         val classes: MutableList<ClassEntry> = mutableListOf(),
         val topLevel: MutableList<TopLevelEntry> = mutableListOf(),
@@ -181,6 +196,15 @@ object KlibApiReader {
 
     // ── Declaration reading ───────────────────────────────────────────────────
 
+    /**
+     * Reads one top-level class/interface/object declaration into its corresponding
+     * [KmpDeclaration] subtype, dispatching on its klib `ClassKind`/modality/`IS_DATA` flags.
+     *
+     * @param all all classes read so far, keyed by fully-qualified name — used to resolve a
+     *        sealed class's nested variant declarations by name.
+     * @return `null` for non-public declarations, `expect` classes, and annotation classes,
+     *         since none of these are meaningful to bridge.
+     */
     private fun readDeclaration(
         cls: ProtoBuf.Class,
         nr: NameResolverImpl,
@@ -250,6 +274,11 @@ object KlibApiReader {
         }
     }
 
+    /**
+     * Reads one direct subclass of a sealed class into the matching [KmpVariant] subtype: an
+     * [KmpVariant.ObjectVariant] for a singleton, [KmpVariant.DataVariant] for a `data class`,
+     * or [KmpVariant.ClassVariant] for a plain class (which may itself be `abstract`).
+     */
     private fun readVariant(cls: ProtoBuf.Class, nr: NameResolverImpl, tt: TypeTable): KmpVariant {
         val name     = nr.getClassId(cls.fqName).shortClassName.asString()
         val kind     = Flags.CLASS_KIND.get(cls.flags)
@@ -269,9 +298,24 @@ object KlibApiReader {
 
     // ── Function reading ──────────────────────────────────────────────────────
 
+    /** Reads every public, bridgeable function declared directly on [cls] (see [readFunction]). */
     private fun readFunctions(cls: ProtoBuf.Class, nr: NameResolverImpl, tt: TypeTable): List<KmpFunction> =
         cls.functionList.mapNotNull { readFunction(it, nr, tt, cls.typeParameterList) }
 
+    /**
+     * Reads one function declaration into a [KmpFunction], resolving its [FunctionKind] from
+     * the `suspend` modifier and return type.
+     *
+     * A `Flow<T>`-returning function (including a `suspend fun` returning `Flow<T>`) is
+     * normalized to [FunctionKind.FLOW] with [KmpFunction.returnType] set to the unwrapped
+     * element type `T`; the `suspend` modifier is otherwise irrelevant once a function is
+     * classified as `FLOW`.
+     *
+     * @param classTypeParams the enclosing class's type parameters (for resolving `T`/`K`/`V`
+     *        references in the signature); empty for a top-level function.
+     * @return `null` for non-public functions and for compiler-synthesized names
+     *         ([SKIP_FUNCTION_NAMES], `componentN()`, and special names like `<init>`).
+     */
     private fun readFunction(
         func: ProtoBuf.Function,
         nr: NameResolverImpl,
@@ -311,6 +355,18 @@ object KlibApiReader {
         return KmpFunction(name = name, kind = kind, params = params, returnType = effectiveReturn)
     }
 
+    /**
+     * Reads one top-level `val`/`var` property as a synthetic zero-parameter
+     * [FunctionKind.SYNC] [KmpFunction] with [KmpFunction.isPropertyGetter] set, so generators
+     * can emit it as a plain property read (e.g. `Foo.bar`) rather than a function call
+     * (`Foo.bar()`).
+     *
+     * Only used for file-scope (top-level) properties — member properties on classes/objects
+     * are not currently read at all (see the `propertyList` limitation noted in the Android
+     * bridge verification doc).
+     *
+     * @return `null` if the property is not public.
+     */
     private fun readPropertyAsGetter(
         prop: ProtoBuf.Property,
         nr: NameResolverImpl,
@@ -331,6 +387,12 @@ object KlibApiReader {
 
     // ── Field reading ─────────────────────────────────────────────────────────
 
+    /**
+     * Reads the primary constructor's value parameters as [KmpField]s — used for both data
+     * class fields and sealed-variant constructor fields.
+     *
+     * @return an empty list if [cls] has no primary (non-secondary) constructor.
+     */
     private fun primaryConstructorFields(
         cls: ProtoBuf.Class,
         nr: NameResolverImpl,
@@ -348,6 +410,7 @@ object KlibApiReader {
 
     // ── Type resolution ───────────────────────────────────────────────────────
 
+    /** Resolves a function's return type, following an inline type reference or a type-table id. */
     private fun resolveReturnType(
         func: ProtoBuf.Function,
         nr: NameResolverImpl,
@@ -358,6 +421,7 @@ object KlibApiReader {
         return readTypeRef(type, nr, tt, typeParams)
     }
 
+    /** Resolves a value parameter's type, following an inline type reference or a type-table id. */
     private fun resolveParamType(
         param: ProtoBuf.ValueParameter,
         nr: NameResolverImpl,
@@ -368,6 +432,14 @@ object KlibApiReader {
         return readTypeRef(type, nr, tt, typeParams)
     }
 
+    /**
+     * Resolves one klib `ProtoBuf.Type` into a [KmpTypeRef], applying the reader's
+     * normalization rules: type aliases are expanded to their underlying type, and generic
+     * type-parameter references (`T`, `K`, `V`) become [KmpTypeRef.TypeParam].
+     *
+     * All other named types are resolved to their fully-qualified name and mapped by
+     * [mapToTypeRef].
+     */
     private fun readTypeRef(
         type: ProtoBuf.Type,
         nr: NameResolverImpl,
@@ -400,6 +472,10 @@ object KlibApiReader {
         return mapToTypeRef(fqn, typeArgs, nullable)
     }
 
+    /**
+     * Resolves one generic type argument, preserving its variance (`out`/`in`/invariant) or
+     * resolving to [KmpTypeArg.Star] for a star projection (`*`).
+     */
     private fun readTypeArg(
         arg: ProtoBuf.Type.Argument,
         nr: NameResolverImpl,
@@ -416,6 +492,15 @@ object KlibApiReader {
         }
     }
 
+    /**
+     * Maps a fully-qualified Kotlin type name to its [KmpTypeRef] representation.
+     *
+     * Recognizes built-in primitives, `Unit`, the read-only and mutable collection interfaces
+     * (mutable variants normalize to the same [CollectionKind] as their read-only
+     * counterparts), and `Flow`/`StateFlow`/`SharedFlow` (and their mutable variants) — all
+     * normalized to [KmpTypeRef.FlowType]. Anything else is treated as a user-defined
+     * [KmpTypeRef.ClassRef].
+     */
     private fun mapToTypeRef(fqn: String, typeArgs: List<KmpTypeArg>, nullable: Boolean): KmpTypeRef = when (fqn) {
         "kotlin/String"  -> KmpTypeRef.Primitive(PrimitiveKind.STRING,  nullable)
         "kotlin/Int"     -> KmpTypeRef.Primitive(PrimitiveKind.INT,     nullable)

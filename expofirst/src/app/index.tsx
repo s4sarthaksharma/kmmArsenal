@@ -20,6 +20,9 @@ import {
   FixtureAsyncApi,
   FixtureAnalytics,
   FixturePrimitivesApi,
+  FixtureInterfaceApi,
+  FixtureRepository,
+  FixtureBaseProcessor,
   FixtureStatus,
   type FixtureUser,
   type FixtureResult,
@@ -801,8 +804,208 @@ function FixtureTab() {
 
 // ─── Root screen ─────────────────────────────────────────────────────────────
 
-type Tab = "Greeting" | "Calculator" | "AsyncWorker" | "TickerService" | "TrafficLight" | "Fixture";
-const TABS: Tab[] = ["Greeting", "Calculator", "AsyncWorker", "TickerService", "TrafficLight", "Fixture"];
+// ─── Tab: Interface ───────────────────────────────────────────────────────────
+
+function InterfaceTab() {
+  const apiRef = useRef<FixtureInterfaceApi | null>(null);
+  const [repo, setRepo] = useState<FixtureRepository | null>(null);
+  const [nullRepo, setNullRepo] = useState<FixtureRepository | null | undefined>(undefined);
+  const [findId, setFindId] = useState("test-user");
+  const [findResult, setFindResult] = useState<unknown>(undefined);
+  const [fetchedRepo, setFetchedRepo] = useState<FixtureRepository | null>(null);
+  const [fetchPending, setFetchPending] = useState(false);
+  const [processor, setProcessor] = useState<FixtureBaseProcessor | null>(null);
+  const [processResult, setProcessResult] = useState<string | null>(null);
+  const [processPending, setProcessPending] = useState(false);
+  // Task 4 state
+  const [processRepoResult, setProcessRepoResult] = useState<string | null>(null);
+  // Task 5 state
+  const [jsRepo, setJsRepo] = useState<FixtureRepository | null>(null);
+  const jsRepoSubRef = useRef<any>(null);
+  const [jsRoundTripResult, setJsRoundTripResult] = useState<unknown>(undefined);
+  const [jsRoundTripPending, setJsRoundTripPending] = useState(false);
+  const [jsRoundTripId, setJsRoundTripId] = useState("js-impl-user");
+  const [nullableRepoResult, setNullableRepoResult] = useState<string | null>(null);
+  const [fetchFromRepoResult, setFetchFromRepoResult] = useState<unknown>(undefined);
+  const [fetchFromRepoPending, setFetchFromRepoPending] = useState(false);
+  const [fetchFromRepoId, setFetchFromRepoId] = useState("from-repo-id");
+  const [processProcessorResult, setProcessProcessorResult] = useState<string | null>(null);
+
+  useEffect(() => {
+    apiRef.current = FixtureInterfaceApi.create();
+    return () => { apiRef.current?.destroy(); apiRef.current = null; jsRepoSubRef.current?.remove(); };
+  }, []);
+
+  return (
+    <ScrollView contentContainerStyle={s.tab} keyboardShouldPersistTaps="handled">
+
+      <Text style={s.section}>Task 1 — TS types</Text>
+
+      <FnCard name="FixtureRepository">
+        <ReplyRow value="class imported ✓" />
+      </FnCard>
+      <FnCard name="FixtureBaseProcessor">
+        <ReplyRow value="class imported ✓" />
+      </FnCard>
+
+      <Text style={s.section}>Task 2 + 3 — interface return type</Text>
+
+      <FnCard name="getRepository(): FixtureRepository">
+        <Btn label="Call" onPress={() => setRepo(apiRef.current?.getRepository() ?? null)} />
+        {repo != null && <ReplyRow value="handle ✓ (FixtureRepository instance)" />}
+      </FnCard>
+
+      <FnCard name="repo.findById(id)  [dispatch through registry]">
+        <StrIn value={findId} onChange={setFindId} placeholder="user id" />
+        <Btn
+          label="Call"
+          disabled={repo == null}
+          onPress={() => { if (!repo) return; setFindResult(repo.findById(findId)); }}
+        />
+        {findResult !== undefined && <JsonRow value={findResult} />}
+      </FnCard>
+
+      <FnCard name="getNullableRepository(): FixtureRepository?">
+        <Btn label="Call" onPress={() => setNullRepo(apiRef.current?.getNullableRepository())} />
+        {nullRepo !== undefined && <ReplyRow value={nullRepo == null ? "→ null ✓" : "handle ✓"} />}
+      </FnCard>
+
+      <FnCard name="fetchRepository(id): suspend FixtureRepository">
+        <Btn
+          label={fetchPending ? "Fetching…" : "Call"}
+          disabled={fetchPending}
+          onPress={async () => {
+            setFetchPending(true);
+            try { setFetchedRepo(await apiRef.current?.fetchRepository("fetch-id") ?? null); }
+            finally { setFetchPending(false); }
+          }}
+        />
+        {fetchedRepo != null && <ReplyRow value="handle ✓ (suspend → FixtureRepository)" />}
+      </FnCard>
+
+      <FnCard name="getProcessor(): FixtureBaseProcessor">
+        <Btn label="Call" onPress={() => setProcessor(apiRef.current?.getProcessor() ?? null)} />
+        {processor != null && (
+          <View style={{ gap: 8 }}>
+            <ReplyRow value="handle ✓ (FixtureBaseProcessor instance)" />
+            <Btn
+              label={processPending ? "Processing…" : "processAsync('hello')"}
+              disabled={processPending}
+              onPress={async () => {
+                setProcessPending(true);
+                try { setProcessResult(await processor.processAsync("hello")); }
+                finally { setProcessPending(false); }
+              }}
+            />
+            {processResult != null && <ReplyRow value={processResult} />}
+          </View>
+        )}
+      </FnCard>
+
+      <Text style={s.section}>Task 4 — interface as parameter</Text>
+
+      <FnCard name="processRepo(repo): String  [non-null interface param]">
+        <Text style={s.hint}>{repo ? "repo ready ✓" : "call getRepository() first"}</Text>
+        <Btn
+          label="processRepo(repo)"
+          disabled={repo == null}
+          onPress={() => setProcessRepoResult(apiRef.current?.processRepo(repo!) ?? null)}
+        />
+        {processRepoResult != null && <ReplyRow value={processRepoResult} />}
+      </FnCard>
+
+      <FnCard name="processNullableRepo(null): String  [nullable interface param]">
+        <Btn
+          label="processNullableRepo(null)"
+          onPress={() => setNullableRepoResult(apiRef.current?.processNullableRepo(null) ?? null)}
+        />
+        {nullableRepoResult != null && <ReplyRow value={nullableRepoResult} />}
+      </FnCard>
+
+      <FnCard name="fetchFromRepo(repo, id): suspend FixtureUser">
+        <StrIn value={fetchFromRepoId} onChange={setFetchFromRepoId} placeholder="user id" />
+        <Btn
+          label={fetchFromRepoPending ? "Fetching…" : "Call"}
+          disabled={repo == null || fetchFromRepoPending}
+          onPress={async () => {
+            if (!repo) return;
+            setFetchFromRepoPending(true);
+            try { setFetchFromRepoResult(await apiRef.current?.fetchFromRepo(repo, fetchFromRepoId)); }
+            finally { setFetchFromRepoPending(false); }
+          }}
+        />
+        {fetchFromRepoResult !== undefined && <JsonRow value={fetchFromRepoResult} />}
+      </FnCard>
+
+      <FnCard name="processProcessor(processor): String">
+        <Text style={s.hint}>{processor ? "processor ready ✓" : "call getProcessor() first"}</Text>
+        <Btn
+          label="processProcessor(processor)"
+          disabled={processor == null}
+          onPress={() => setProcessProcessorResult(apiRef.current?.processProcessor(processor!) ?? null)}
+        />
+        {processProcessorResult != null && <ReplyRow value={processProcessorResult} />}
+      </FnCard>
+
+      <Text style={s.section}>Task 5 — JS implements the interface</Text>
+
+      <FnCard name="FixtureRepository.create()  [JS-implemented]">
+        <Btn
+          label={jsRepo ? "JS impl created ✓" : "Create JS impl"}
+          muted={jsRepo != null}
+          onPress={() => {
+            if (jsRepo) return;
+            const r = FixtureRepository.create();
+            jsRepoSubRef.current = r.addCallFetchByIdListener(({ callId, id }) => {
+              const user: FixtureUser = {
+                id,
+                age: 42,
+                score: 9.9,
+                active: true,
+                byteFlag: 1,
+                longId: 999,
+                initial: 'J',
+                ratio: 1.0,
+                status: FixtureStatus.ACTIVE,
+                address: null,
+                tags: ['js-impl'],
+                metadata: {},
+                aliases: [],
+              };
+              r.resolveFetchById(callId, user);
+            });
+            setJsRepo(r);
+          }}
+        />
+        {jsRepo && <ReplyRow value="fetchById handler registered ✓" />}
+      </FnCard>
+
+      <FnCard name="fetchFromRepo(jsRepo, id)  [roundtrip: Kotlin calls JS]">
+        <Text style={s.hint}>{jsRepo ? 'Kotlin calls repo.fetchById() → JS resolves' : 'Create JS impl first'}</Text>
+        <StrIn value={jsRoundTripId} onChange={setJsRoundTripId} placeholder="user id" />
+        <Btn
+          label={jsRoundTripPending ? 'Waiting for JS resolve…' : 'Call fetchFromRepo(jsRepo, id)'}
+          disabled={!jsRepo || jsRoundTripPending}
+          onPress={async () => {
+            if (!jsRepo) return;
+            setJsRoundTripPending(true);
+            try {
+              const result = await apiRef.current?.fetchFromRepo(jsRepo, jsRoundTripId);
+              setJsRoundTripResult(result);
+            } finally {
+              setJsRoundTripPending(false);
+            }
+          }}
+        />
+        {jsRoundTripResult !== undefined && <JsonRow value={jsRoundTripResult} />}
+      </FnCard>
+
+    </ScrollView>
+  );
+}
+
+type Tab = "Greeting" | "Calculator" | "AsyncWorker" | "TickerService" | "TrafficLight" | "Fixture" | "Interface";
+const TABS: Tab[] = ["Greeting", "Calculator", "AsyncWorker", "TickerService", "TrafficLight", "Fixture", "Interface"];
 
 export default function Index() {
   const [tab, setTab] = useState<Tab>("Greeting");
@@ -838,6 +1041,7 @@ export default function Index() {
       {tab === "TickerService" && <TickerServiceTab />}
       {tab === "TrafficLight"  && <TrafficLightTab />}
       {tab === "Fixture"       && <FixtureTab />}
+      {tab === "Interface"     && <InterfaceTab />}
     </KeyboardAvoidingView>
   );
 }

@@ -18,9 +18,11 @@ object SwiftGenerator {
         frameworkName: String,
         onSkip: (String) -> Unit = {},
     ): String {
-        val enumNames   = module.declarations.filterIsInstance<KmpDeclaration.KmpEnum>().map { it.name }.toSet()
-        val dataNames   = module.declarations.filterIsInstance<KmpDeclaration.KmpDataClass>().map { it.name }.toSet()
-        val sealedNames = module.declarations.filterIsInstance<KmpDeclaration.KmpSealedClass>().map { it.name }.toSet()
+        val enumNames      = module.declarations.filterIsInstance<KmpDeclaration.KmpEnum>().map { it.name }.toSet()
+        val dataNames      = module.declarations.filterIsInstance<KmpDeclaration.KmpDataClass>().map { it.name }.toSet()
+        val sealedNames    = module.declarations.filterIsInstance<KmpDeclaration.KmpSealedClass>().map { it.name }.toSet()
+        val interfaceNames = module.declarations.filterIsInstance<KmpDeclaration.KmpInterface>().map { it.name }.toSet()
+        val abstractNames  = module.declarations.filterIsInstance<KmpDeclaration.KmpClass>().filter { it.isAbstract }.map { it.name }.toSet()
 
         val records = sourceFile.declarations.filterIsInstance<KmpDeclaration.KmpDataClass>()
             .filter { dc ->
@@ -31,16 +33,13 @@ object SwiftGenerator {
             }
         val sealeds = sourceFile.declarations.filterIsInstance<KmpDeclaration.KmpSealedClass>()
 
+        val interfaceDecls = sourceFile.declarations.filter { decl ->
+            decl is KmpDeclaration.KmpInterface || (decl is KmpDeclaration.KmpClass && decl.isAbstract)
+        }
         val bridgeableDecls = sourceFile.declarations.filter { decl ->
             when {
-                decl is KmpDeclaration.KmpInterface -> {
-                    onSkip("CLASS SKIPPED: ${decl.name} — interfaces are not bridged.")
-                    false
-                }
-                decl is KmpDeclaration.KmpClass && decl.isAbstract -> {
-                    onSkip("CLASS SKIPPED: ${decl.name} — abstract classes are not bridged.")
-                    false
-                }
+                decl is KmpDeclaration.KmpInterface -> false
+                decl is KmpDeclaration.KmpClass && decl.isAbstract -> false
                 decl is KmpDeclaration.KmpClass && decl.functions.isEmpty() -> {
                     onSkip("CLASS SKIPPED: ${decl.name} — no functions to bridge.")
                     false
@@ -76,10 +75,10 @@ object SwiftGenerator {
             val isInstanceBased = !isObject && !isFileScope
             val extraParams = if (isInstanceBased) 1 else 0
             for (fn in decl.declFunctions()) {
-                if (!fn.isBridgeable(enumNames, dataNames, sealedNames, extraParams = extraParams)) {
+                if (!fn.isBridgeable(enumNames, dataNames, sealedNames, extraParams = extraParams, interfaceNames = interfaceNames, abstractNames = abstractNames)) {
                     val reason = when {
                         fn.params.size + extraParams > MAX_EXPO_FUNCTION_PARAMS -> "too many params (${fn.params.size} > ${MAX_EXPO_FUNCTION_PARAMS - extraParams})"
-                        !fn.returnType.isSwiftBridgeable(enumNames, dataNames, sealedNames) -> "unbridgeable return type"
+                        !fn.returnType.isSwiftBridgeable(enumNames, dataNames, sealedNames, interfaceNames, abstractNames) -> "unbridgeable return type"
                         else -> "unbridgeable param type"
                     }
                     onSkip("FUNCTION SKIPPED: ${decl.declName()}.${fn.name}() — $reason.")
@@ -87,7 +86,7 @@ object SwiftGenerator {
             }
         }
 
-        if (records.isEmpty() && sealeds.isEmpty() && bridgeableDecls.isEmpty()) return ""
+        if (records.isEmpty() && sealeds.isEmpty() && bridgeableDecls.isEmpty() && interfaceDecls.isEmpty()) return ""
 
         // Collect enum names that need decode helpers — from function params, Record fields,
         // and sealed variant fields.
@@ -96,7 +95,7 @@ object SwiftGenerator {
             if (t is KmpTypeRef.ClassRef && t.simpleName in enumNames) decodedEnumNames.add(t.simpleName)
         }
         for (decl in bridgeableDecls) {
-            val bridgeable = decl.declFunctions().filter { it.isBridgeable(enumNames, dataNames, sealedNames) }
+            val bridgeable = decl.declFunctions().filter { it.isBridgeable(enumNames, dataNames, sealedNames, interfaceNames = interfaceNames, abstractNames = abstractNames) }
             for (fn in bridgeable) { fn.params.forEach { collectEnumRef(it.type) } }
         }
         for (record in records) { record.fields.forEach { collectEnumRef(it.type) } }
@@ -126,7 +125,13 @@ object SwiftGenerator {
             for (decl in bridgeableDecls) {
                 val nameOverride = if (decl is KmpDeclaration.KmpFileScope && decl.fileName in takenNames) "${decl.fileName}Kt" else null
                 appendLine()
-                appendModuleClass(decl, enumNames, dataNames, sealedNames, moduleNameOverride = nameOverride)
+                appendModuleClass(decl, enumNames, dataNames, sealedNames, moduleNameOverride = nameOverride, interfaceNames = interfaceNames, abstractNames = abstractNames)
+            }
+
+            // ── Interface/abstract registry module classes ───────────────────
+            for (decl in interfaceDecls) {
+                appendLine()
+                appendInterfaceModuleClass(decl, enumNames, dataNames, sealedNames, interfaceNames, abstractNames, frameworkName)
             }
 
             // ── Enum decode helpers (throwing) ──────────────────────────────
@@ -313,6 +318,8 @@ object SwiftGenerator {
         dataNames: Set<String>,
         sealedNames: Set<String>,
         moduleNameOverride: String? = null,
+        interfaceNames: Set<String> = emptySet(),
+        abstractNames: Set<String> = emptySet(),
     ) {
         val name        = moduleNameOverride ?: decl.declName()
         val isObject    = decl is KmpDeclaration.KmpObject
@@ -320,7 +327,7 @@ object SwiftGenerator {
         val isInstanceBased = !isObject && !isFileScope
         val extraParams = if (isInstanceBased) 1 else 0
         val bridgeable  = decl.declFunctions().filter { fn ->
-            fn.isBridgeable(enumNames, dataNames, sealedNames, extraParams = extraParams)
+            fn.isBridgeable(enumNames, dataNames, sealedNames, extraParams = extraParams, interfaceNames = interfaceNames, abstractNames = abstractNames)
         }
         if (bridgeable.isEmpty()) return
 
@@ -362,8 +369,8 @@ object SwiftGenerator {
                 for (fn in bridgeable) {
                     appendLine()
                     when (fn.kind) {
-                        FunctionKind.SYNC    -> appendSyncFunction(fn, instance, enumNames, dataNames, sealedNames)
-                        FunctionKind.SUSPEND -> appendSuspendFunction(fn, instance, enumNames, dataNames, sealedNames)
+                        FunctionKind.SYNC    -> appendSyncFunction(fn, instance, enumNames, dataNames, sealedNames, interfaceNames = interfaceNames, abstractNames = abstractNames)
+                        FunctionKind.SUSPEND -> appendSuspendFunction(fn, instance, enumNames, dataNames, sealedNames, interfaceNames = interfaceNames, abstractNames = abstractNames)
                         FunctionKind.FLOW    -> appendFlowFunctions(fn, instance, enumNames, dataNames, sealedNames)
                     }
                 }
@@ -401,8 +408,8 @@ object SwiftGenerator {
                 for (fn in bridgeable) {
                     appendLine()
                     when (fn.kind) {
-                        FunctionKind.SYNC    -> appendSyncFunction(fn, facadeName, enumNames, dataNames, sealedNames, isFileScope = true)
-                        FunctionKind.SUSPEND -> appendSuspendFunction(fn, facadeName, enumNames, dataNames, sealedNames, isFileScope = true)
+                        FunctionKind.SYNC    -> appendSyncFunction(fn, facadeName, enumNames, dataNames, sealedNames, isFileScope = true, interfaceNames = interfaceNames, abstractNames = abstractNames)
+                        FunctionKind.SUSPEND -> appendSuspendFunction(fn, facadeName, enumNames, dataNames, sealedNames, isFileScope = true, interfaceNames = interfaceNames, abstractNames = abstractNames)
                         FunctionKind.FLOW    -> appendFlowFunctions(fn, facadeName, enumNames, dataNames, sealedNames, isFileScope = true)
                     }
                 }
@@ -453,8 +460,8 @@ object SwiftGenerator {
                 for (fn in bridgeable) {
                     appendLine()
                     when (fn.kind) {
-                        FunctionKind.SYNC    -> appendSyncFunction(fn, "", enumNames, dataNames, sealedNames, isInstanceBased = true)
-                        FunctionKind.SUSPEND -> appendSuspendFunction(fn, "", enumNames, dataNames, sealedNames, isInstanceBased = true)
+                        FunctionKind.SYNC    -> appendSyncFunction(fn, "", enumNames, dataNames, sealedNames, isInstanceBased = true, interfaceNames = interfaceNames, abstractNames = abstractNames)
+                        FunctionKind.SUSPEND -> appendSuspendFunction(fn, "", enumNames, dataNames, sealedNames, isInstanceBased = true, interfaceNames = interfaceNames, abstractNames = abstractNames)
                         FunctionKind.FLOW    -> appendFlowFunctions(fn, "", enumNames, dataNames, sealedNames, isInstanceBased = true)
                     }
                 }
@@ -463,6 +470,428 @@ object SwiftGenerator {
 
         appendLine("  }")
         appendLine("}")
+    }
+
+    // ── Interface registry module class ──────────────────────────────────────
+
+    private fun StringBuilder.appendInterfaceModuleClass(
+        decl: KmpDeclaration,
+        enumNames: Set<String>,
+        dataNames: Set<String>,
+        sealedNames: Set<String>,
+        interfaceNames: Set<String> = emptySet(),
+        abstractNames: Set<String> = emptySet(),
+        frameworkName: String = "Shared",
+    ) {
+        val name        = decl.declName()
+        val isAbstract  = decl is KmpDeclaration.KmpClass && (decl as KmpDeclaration.KmpClass).isAbstract
+        val allFns      = decl.declFunctions()
+        val bridgeable  = allFns.filter { fn ->
+            fn.isBridgeable(enumNames, dataNames, sealedNames, extraParams = 1, interfaceNames = interfaceNames, abstractNames = abstractNames)
+        }
+        if (bridgeable.isEmpty()) return
+
+        val suspendFns = allFns.filter { it.kind == FunctionKind.SUSPEND }
+        val hasSuspend = suspendFns.isNotEmpty()
+        val flows      = bridgeable.filter { it.kind == FunctionKind.FLOW }
+        val hasFlows   = flows.isNotEmpty()
+
+        // All events: flow updates + JS call events (for reverse bridge)
+        val flowEvents = flows.map { "on${it.flowBaseName.cap()}Update" }
+        val callEvents = suspendFns.map { "call${it.name.cap()}" }
+        val allEvents  = flowEvents + callEvents
+
+        // ── JS impl class ─────────────────────────────────────────────────────
+        val superInit = if (isAbstract) "\n    super.init()" else ""
+
+        if (isAbstract) {
+            // Abstract class: subclass and override SKIE's __ prefixed methods
+            appendLine("fileprivate class ${name}JsImpl: $name {")
+            appendLine("  private let instanceId: String")
+            appendLine("  private let emit: (String, [String: Any?]) -> Void")
+            appendLine("  init(instanceId: String, emit: @escaping (String, [String: Any?]) -> Void) {")
+            appendLine("    self.instanceId = instanceId")
+            appendLine("    self.emit = emit$superInit")
+            appendLine("  }")
+
+            for (fn in allFns) {
+                appendLine()
+                val pListNative = fn.params.joinToString(", ") { p ->
+                    "${p.name}: ${p.type.toSwiftNativeType(enumNames, dataNames, sealedNames)}"
+                }
+                when (fn.kind) {
+                    FunctionKind.SYNC -> {
+                        val retT = fn.returnType.toSwiftNativeType(enumNames, dataNames, sealedNames)
+                        appendLine("  override func ${fn.name}($pListNative) -> $retT {")
+                        appendLine("""    fatalError("${fn.name} is sync — cannot be JS-implemented")""")
+                        appendLine("  }")
+                    }
+                    FunctionKind.SUSPEND -> {
+                        val nativeRetT = fn.returnType.toSwiftNativeType(enumNames, dataNames, sealedNames)
+                        val eventName  = "call${fn.name.cap()}"
+                        val paramMap   = buildString {
+                            append(""""instanceId": instanceId, "callId": callId""")
+                            for (p in fn.params) append(""", "${p.name}": ${p.name}""")
+                        }
+                        // SKIE renames the ObjC completion handler form with __ prefix in Swift.
+                        // Overriding it tells ObjC dispatch to use our implementation.
+                        appendLine("  override func __${fn.name}($pListNative, completionHandler: @escaping ($nativeRetT?, Error?) -> Void) {")
+                        appendLine("    let callId = UUID().uuidString")
+                        appendLine("    ${name}Module._pendingCalls[callId] = { value, error in")
+                        appendLine("      completionHandler(value as? $nativeRetT, error)")
+                        appendLine("    }")
+                        appendLine("    emit(\"$eventName\", [$paramMap])")
+                        appendLine("  }")
+                    }
+                    FunctionKind.FLOW -> {
+                        val flowRetT = fn.returnType.toSkieSwiftFlowReturnType(enumNames, dataNames, sealedNames)
+                        appendLine("  override func ${fn.name}($pListNative) -> $flowRetT {")
+                        appendLine("""    fatalError("${fn.name} is Flow — JS implementation not yet supported")""")
+                        appendLine("  }")
+                    }
+                }
+            }
+            appendLine("}")
+        } else {
+            // Protocol: Swift compile-time conformance checking fights SKIE's transformations.
+            // Use ObjC runtime: implement required selectors via @objc, then class_addProtocol
+            // to declare conformance at runtime — bypasses Swift's static checker entirely.
+            appendLine("fileprivate class ${name}JsImpl: NSObject {")
+            appendLine("  // Register ObjC protocol conformance at first use (bypasses SKIE Swift restrictions)")
+            appendLine("  static let _register: () = {")
+            appendLine("    if let proto = objc_getProtocol(\"${frameworkName}${name}\") {")
+            appendLine("      class_addProtocol(${name}JsImpl.self, proto)")
+            appendLine("    }")
+            appendLine("  }()")
+            appendLine()
+            appendLine("  private let instanceId: String")
+            appendLine("  private let emit: (String, [String: Any?]) -> Void")
+            appendLine("  init(instanceId: String, emit: @escaping (String, [String: Any?]) -> Void) {")
+            appendLine("    self.instanceId = instanceId")
+            appendLine("    self.emit = emit")
+            appendLine("  }")
+
+            for (fn in allFns) {
+                appendLine()
+                // ObjC selector: methodName + eachParam.name.capitalized() + ":"
+                when (fn.kind) {
+                    FunctionKind.SYNC -> {
+                        val retT = fn.returnType.toSwiftNativeType(enumNames, dataNames, sealedNames)
+                        val selector = fn.name + fn.params.joinToString("") { it.name.cap() + ":" }
+                        val pListObjc = fn.params.joinToString(", ") { "_ ${it.name}: ${it.type.toSwiftNativeType(enumNames, dataNames, sealedNames)}" }
+                        appendLine("  @objc($selector)")
+                        appendLine("  func ${fn.name}_sync($pListObjc) -> $retT {")
+                        appendLine("""    fatalError("${fn.name} is sync — cannot be JS-implemented")""")
+                        appendLine("  }")
+                    }
+                    FunctionKind.SUSPEND -> {
+                        val nativeRetT = fn.returnType.toSwiftNativeType(enumNames, dataNames, sealedNames)
+                        val eventName  = "call${fn.name.cap()}"
+                        val paramMap   = buildString {
+                            append(""""instanceId": instanceId, "callId": callId""")
+                            for (p in fn.params) append(""", "${p.name}": ${p.name}""")
+                        }
+                        val selector = fn.name + fn.params.joinToString("") { it.name.cap() + ":" } + "completionHandler:"
+                        val pListObjc = fn.params.joinToString(", ") { "_ ${it.name}: ${it.type.toSwiftNativeType(enumNames, dataNames, sealedNames)}" }
+                        appendLine("  @objc($selector)")
+                        appendLine("  func ${fn.name}_cb($pListObjc, completionHandler: @escaping ($nativeRetT?, NSError?) -> Void) {")
+                        appendLine("    let callId = UUID().uuidString")
+                        appendLine("    ${name}Module._pendingCalls[callId] = { value, error in")
+                        appendLine("      completionHandler(value as? $nativeRetT, error.map { \$0 as NSError })")
+                        appendLine("    }")
+                        appendLine("    emit(\"$eventName\", [$paramMap])")
+                        appendLine("  }")
+                    }
+                    FunctionKind.FLOW -> {
+                        val selector = fn.name + fn.params.joinToString("") { it.name.cap() + ":" }
+                        val pListObjc = fn.params.joinToString(", ") { "_ ${it.name}: ${it.type.toSwiftNativeType(enumNames, dataNames, sealedNames)}" }
+                        appendLine("  @objc($selector)")
+                        appendLine("  func ${fn.name}_flow($pListObjc) -> AnyObject? {")
+                        appendLine("""    fatalError("${fn.name} is Flow — JS implementation not yet supported")""")
+                        appendLine("  }")
+                    }
+                }
+            }
+            appendLine("}")
+        }
+        appendLine()
+
+        // ── Module class ─────────────────────────────────────────────────────
+        appendLine("public class ${name}Module: Module {")
+
+        if (hasFlows) {
+            val enumCases = "case " + flows.joinToString(", ") { it.flowBaseName }
+            appendLine("  private enum FlowKey { $enumCases }")
+        }
+
+        appendLine("  static var _instances: [String: $name] = [:]")
+        if (hasFlows) {
+            appendLine("  private static var _flowTasks: [String: [FlowKey: Task<Void, Never>]] = [:]")
+        }
+        if (hasSuspend) {
+            appendLine("  static var _pendingCalls: [String: (Any?, Error?) -> Void] = [:]")
+        }
+        appendLine()
+        appendLine("  static func _register(_ instance: $name) -> String {")
+        appendLine("    let id = UUID().uuidString")
+        appendLine("    _instances[id] = instance")
+        appendLine("    return id")
+        appendLine("  }")
+
+        appendLine()
+        appendLine("  public func definition() -> ModuleDefinition {")
+        appendLine("""    Name("$name")""")
+
+        if (allEvents.isNotEmpty()) {
+            appendLine()
+            appendLine("""    Events(${allEvents.joinToString(", ") { "\"$it\"" }})""")
+        }
+
+        if (hasFlows) {
+            appendLine()
+            appendLine("    OnDestroy {")
+            appendLine("      Self._flowTasks.values.flatMap { \$0.values }.forEach { \$0.cancel() }")
+            appendLine("      Self._flowTasks.removeAll()")
+            appendLine("      Self._instances.removeAll()")
+            appendLine("    }")
+        }
+
+        // create() — instantiates JS impl class
+        appendLine()
+        appendLine("""    Function("create") {""")
+        appendLine("      let instanceId = UUID().uuidString")
+        appendLine("      let impl = ${name}JsImpl(instanceId: instanceId) { [weak self] name, body in")
+        appendLine("        self?.sendEvent(name, body)")
+        appendLine("      }")
+        if (isAbstract) {
+            appendLine("      Self._instances[instanceId] = impl")
+        } else {
+            // class_addProtocol was called at class load; now the ObjC runtime accepts the cast
+            appendLine("      _ = ${name}JsImpl._register")
+            appendLine("      Self._instances[instanceId] = impl as! any $name")
+        }
+        appendLine("      return instanceId")
+        appendLine("    }")
+
+        appendLine()
+        appendLine("""    Function("destroy") { (instanceId: String) in""")
+        if (hasFlows) {
+            appendLine("      Self._flowTasks[instanceId]?.values.forEach { \$0.cancel() }")
+            appendLine("      Self._flowTasks.removeValue(forKey: instanceId)")
+        }
+        appendLine("      Self._instances.removeValue(forKey: instanceId)")
+        appendLine("    }")
+
+        // Bridge dispatch functions (for calling methods on externally-registered instances)
+        for (fn in bridgeable) {
+            appendLine()
+            when (fn.kind) {
+                FunctionKind.SYNC    -> appendInterfaceSyncFunction(fn, name, enumNames, dataNames, sealedNames, interfaceNames, abstractNames)
+                FunctionKind.SUSPEND -> appendInterfaceSuspendFunction(fn, name, enumNames, dataNames, sealedNames, interfaceNames, abstractNames)
+                FunctionKind.FLOW    -> appendInterfaceFlowFunctions(fn, name, enumNames, dataNames, sealedNames)
+            }
+        }
+
+        // resolve functions for each SUSPEND method (JS → Kotlin callback)
+        for (fn in suspendFns) {
+            val resolveName   = "resolve${fn.name.cap()}"
+            val resolveType   = fn.returnType.toSwiftResolveParamType(enumNames, dataNames, sealedNames)
+            val resolveConv   = fn.returnType.toSwiftResolveConversion("result", enumNames, dataNames, sealedNames)
+            val needsTryCatch = resolveConv.startsWith("try ")
+            appendLine()
+            if (resolveType == null) {
+                appendLine("""    Function("$resolveName") { (instanceId: String, callId: String) in""")
+                appendLine("      Self._pendingCalls.removeValue(forKey: callId)?(nil, nil)")
+            } else {
+                appendLine("""    Function("$resolveName") { (instanceId: String, callId: String, result: $resolveType) throws in""")
+                appendLine("      guard let handler = Self._pendingCalls.removeValue(forKey: callId) else { return }")
+                if (needsTryCatch) {
+                    appendLine("      do { handler($resolveConv, nil) } catch { handler(nil, error) }")
+                } else {
+                    appendLine("      handler($resolveConv, nil)")
+                }
+            }
+            appendLine("    }")
+        }
+
+        appendLine("  }")
+        appendLine("}")
+    }
+
+    // ── SKIE flow return type for impl class ─────────────────────────────────
+    // fn.returnType is the ELEMENT type (Flow wrapper stripped). Convert to SkieSwiftFlow<ElemType>.
+    private fun KmpTypeRef.toSkieSwiftFlowReturnType(
+        enumNames: Set<String>,
+        dataNames: Set<String>,
+        sealedNames: Set<String>,
+    ): String {
+        val elemType = when {
+            this is KmpTypeRef.Primitive -> when (kind) {
+                PrimitiveKind.STRING  -> "String"
+                PrimitiveKind.BOOLEAN -> "KotlinBoolean"
+                PrimitiveKind.INT     -> "KotlinInt"
+                PrimitiveKind.LONG    -> "KotlinLong"
+                PrimitiveKind.DOUBLE  -> "KotlinDouble"
+                PrimitiveKind.FLOAT   -> "KotlinFloat"
+                else                  -> "AnyObject"
+            }
+            this is KmpTypeRef.ClassRef -> simpleName
+            this is KmpTypeRef.CollectionType && kind == CollectionKind.LIST -> {
+                val inner = (typeArgs.firstOrNull() as? KmpTypeArg.Invariant)?.type
+                "[${inner?.toSwiftNativeType(enumNames, dataNames, sealedNames) ?: "AnyObject"}]"
+            }
+            else -> "AnyObject"
+        }
+        return "SkieSwiftFlow<$elemType>"
+    }
+
+    // ── Swift native type (SKIE-transformed, no framework prefix) ────────────
+    // SKIE drops the "Shared" framework prefix — types use their Kotlin simple name directly
+    private fun KmpTypeRef.toSwiftNativeType(
+        enumNames: Set<String>,
+        dataNames: Set<String>,
+        sealedNames: Set<String>,
+    ): String {
+        val base = when {
+            this is KmpTypeRef.UnitType  -> return "Void"
+            this is KmpTypeRef.Primitive -> when (kind) {
+                PrimitiveKind.STRING  -> "String"
+                PrimitiveKind.BOOLEAN -> "Bool"
+                PrimitiveKind.INT     -> "Int32"
+                PrimitiveKind.LONG    -> "Int64"
+                PrimitiveKind.DOUBLE  -> "Double"
+                PrimitiveKind.FLOAT   -> "Float"
+                PrimitiveKind.CHAR    -> "Any"
+                PrimitiveKind.BYTE    -> "Int8"
+                PrimitiveKind.SHORT   -> "Int16"
+            }
+            this is KmpTypeRef.ClassRef  -> simpleName  // SKIE drops the framework prefix
+            else                         -> "Any"
+        }
+        return if (isNullable) "$base?" else base
+    }
+
+    // ── Swift resolve param type (what JS sends via Expo Record) ─────────────
+    private fun KmpTypeRef.toSwiftResolveParamType(
+        enumNames: Set<String>,
+        dataNames: Set<String>,
+        sealedNames: Set<String>,
+    ): String? = when {
+        this is KmpTypeRef.UnitType  -> null
+        this is KmpTypeRef.Primitive -> when (kind) {
+            PrimitiveKind.STRING  -> if (isNullable) "String?" else "String"
+            PrimitiveKind.BOOLEAN -> if (isNullable) "Bool?"   else "Bool"
+            PrimitiveKind.INT     -> if (isNullable) "Int32?"  else "Int32"
+            PrimitiveKind.LONG    -> if (isNullable) "Double?" else "Double"
+            PrimitiveKind.DOUBLE  -> if (isNullable) "Double?" else "Double"
+            PrimitiveKind.FLOAT   -> if (isNullable) "Float?"  else "Float"
+            PrimitiveKind.CHAR    -> if (isNullable) "String?" else "String"
+            PrimitiveKind.BYTE    -> if (isNullable) "Int32?"  else "Int32"
+            PrimitiveKind.SHORT   -> if (isNullable) "Int32?"  else "Int32"
+        }
+        this is KmpTypeRef.ClassRef && simpleName in enumNames   -> if (isNullable) "String?" else "String"
+        this is KmpTypeRef.ClassRef && simpleName in dataNames   -> if (isNullable) "${simpleName}Record?" else "${simpleName}Record"
+        this is KmpTypeRef.ClassRef && simpleName in sealedNames -> if (isNullable) "${simpleName}Record?" else "${simpleName}Record"
+        else -> "Any?"
+    }
+
+    // ── How to convert the resolve result before passing to the handler ───────
+    private fun KmpTypeRef.toSwiftResolveConversion(
+        varName: String,
+        enumNames: Set<String>,
+        dataNames: Set<String>,
+        sealedNames: Set<String>,
+    ): String = when {
+        this is KmpTypeRef.ClassRef && (simpleName in dataNames || simpleName in sealedNames) ->
+            if (isNullable) "$varName.map { try \$0.toKmp() }" else "try $varName.toKmp()"
+        else -> varName
+    }
+
+    private fun StringBuilder.appendInterfaceSyncFunction(
+        fn: KmpFunction,
+        typeName: String,
+        enumNames: Set<String>,
+        dataNames: Set<String>,
+        sealedNames: Set<String>,
+        interfaceNames: Set<String> = emptySet(),
+        abstractNames: Set<String> = emptySet(),
+    ) {
+        val ownParams = fn.params.joinToString(", ") { "${it.name}: ${it.type.toSwiftBridgeType(enumNames, dataNames, sealedNames, interfaceNames, abstractNames)}" }
+        val paramList = if (ownParams.isEmpty()) "instanceId: String" else "instanceId: String, $ownParams"
+        val callArgs  = fn.params.joinToString(", ") { p ->
+            val (prefix, arg) = p.type.toSwiftCallArgWithPrefix(p.name, enumNames, dataNames, sealedNames, interfaceNames, abstractNames)
+            "${p.name}: ${prefix}$arg"
+        }
+        val throwsClause = if (fn.needsThrows(enumNames, dataNames, sealedNames)) " throws" else ""
+        appendLine("""    Function("${fn.name}") { ($paramList)$throwsClause in""")
+        appendLine("      guard let inst = Self._instances[instanceId] else { fatalError(\"Instance not found: \\(instanceId)\") }")
+        val rawCall    = "inst.${fn.name}(${if (fn.params.isEmpty()) "" else callArgs})"
+        val returnExpr = fn.returnType.wrapReturnExpr(rawCall, enumNames, dataNames, sealedNames, interfaceNames, abstractNames)
+        appendLine("      return $returnExpr")
+        appendLine("    }")
+    }
+
+    private fun StringBuilder.appendInterfaceSuspendFunction(
+        fn: KmpFunction,
+        typeName: String,
+        enumNames: Set<String>,
+        dataNames: Set<String>,
+        sealedNames: Set<String>,
+        interfaceNames: Set<String> = emptySet(),
+        abstractNames: Set<String> = emptySet(),
+    ) {
+        val ownParams = fn.params.map { "${it.name}: ${it.type.toSwiftBridgeType(enumNames, dataNames, sealedNames, interfaceNames, abstractNames)}" }
+        val allParams = listOf("instanceId: String") + ownParams + listOf("promise: Promise")
+        val paramList = allParams.joinToString(", ")
+        val callArgs  = fn.params.joinToString(", ") { p ->
+            val (prefix, arg) = p.type.toSwiftCallArgWithPrefix(p.name, enumNames, dataNames, sealedNames, interfaceNames, abstractNames)
+            "${p.name}: ${prefix}$arg"
+        }
+        val throwsClause = if (fn.needsThrows(enumNames, dataNames, sealedNames)) " throws" else ""
+        appendLine("""    AsyncFunction("${fn.name}") { ($paramList)$throwsClause in""")
+        appendLine("      guard let inst = Self._instances[instanceId] else { fatalError(\"Instance not found: \\(instanceId)\") }")
+        val rawCall    = "inst.${fn.name}(${if (fn.params.isEmpty()) "" else callArgs})"
+        val returnExpr = fn.returnType.wrapReturnExpr(rawCall, enumNames, dataNames, sealedNames, interfaceNames, abstractNames)
+        appendLine("      Task { [weak self] in")
+        appendLine("        guard let self else { return }")
+        appendLine("        do {")
+        appendLine("          let result = try await $returnExpr")
+        appendLine("          promise.resolve(result)")
+        appendLine("        } catch {")
+        appendLine("          promise.reject(error)")
+        appendLine("        }")
+        appendLine("      }")
+        appendLine("    }")
+    }
+
+    private fun StringBuilder.appendInterfaceFlowFunctions(
+        fn: KmpFunction,
+        typeName: String,
+        enumNames: Set<String>,
+        dataNames: Set<String>,
+        sealedNames: Set<String>,
+    ) {
+        val base      = fn.flowBaseName
+        val Cap       = base.cap()
+        val eventName = "on${Cap}Update"
+        val valueExpr = fn.returnType.toSwiftFlowValueExpr(enumNames, dataNames, sealedNames)
+
+        appendLine("""    Function("start$Cap") { (instanceId: String) in""")
+        appendLine("      Self._flowTasks[instanceId]?[.$base]?.cancel()")
+        appendLine("      if Self._flowTasks[instanceId] == nil { Self._flowTasks[instanceId] = [:] }")
+        appendLine("      guard let inst = Self._instances[instanceId] else { return }")
+        appendLine("      Self._flowTasks[instanceId]![.$base] = Task { [weak self] in")
+        appendLine("        guard let self else { return }")
+        appendLine("        for await value in inst.${fn.name}() {")
+        appendLine("""          self.sendEvent("$eventName", ["instanceId": instanceId, "value": $valueExpr])""")
+        appendLine("        }")
+        appendLine("      }")
+        appendLine("    }")
+        appendLine()
+        appendLine("""    Function("stop$Cap") { (instanceId: String) in""")
+        appendLine("      Self._flowTasks[instanceId]?[.$base]?.cancel()")
+        appendLine("      Self._flowTasks[instanceId]?.removeValue(forKey: .$base)")
+        appendLine("    }")
     }
 
     // ── Function emitters ─────────────────────────────────────────────────────
@@ -475,14 +904,16 @@ object SwiftGenerator {
         sealedNames: Set<String>,
         isInstanceBased: Boolean = false,
         isFileScope: Boolean = false,
+        interfaceNames: Set<String> = emptySet(),
+        abstractNames: Set<String> = emptySet(),
     ) {
         append(formatComment(fn.docComment))
-        val ownParams = fn.params.joinToString(", ") { "${it.name}: ${it.type.toSwiftBridgeType(enumNames, dataNames, sealedNames)}" }
+        val ownParams = fn.params.joinToString(", ") { "${it.name}: ${it.type.toSwiftBridgeType(enumNames, dataNames, sealedNames, interfaceNames, abstractNames)}" }
         val paramList = if (isInstanceBased)
             if (ownParams.isEmpty()) "instanceId: String" else "instanceId: String, $ownParams"
         else ownParams
         val callArgs = fn.params.joinToString(", ") { p ->
-            val (prefix, arg) = p.type.toSwiftCallArgWithPrefix(p.name, enumNames, dataNames, sealedNames)
+            val (prefix, arg) = p.type.toSwiftCallArgWithPrefix(p.name, enumNames, dataNames, sealedNames, interfaceNames, abstractNames)
             "${p.name}: ${prefix}$arg"
         }
         val throwsClause = if (fn.needsThrows(enumNames, dataNames, sealedNames)) " throws" else ""
@@ -491,7 +922,7 @@ object SwiftGenerator {
             appendLine("""    Function("${fn.name}") { ($paramList)$throwsClause in""")
             appendLine("      guard let inst = self.instances[instanceId] else { fatalError(\"Instance not found: \\(instanceId)\") }")
             val rawCall    = "inst.${fn.name}(${if (fn.params.isEmpty()) "" else callArgs})"
-            val returnExpr = fn.returnType.wrapReturnExpr(rawCall, enumNames, dataNames, sealedNames)
+            val returnExpr = fn.returnType.wrapReturnExpr(rawCall, enumNames, dataNames, sealedNames, interfaceNames, abstractNames)
             appendLine("      return $returnExpr")
         } else {
             // For file scope, `instance` is the facade type name — call as class method (no `self.`).
@@ -500,7 +931,7 @@ object SwiftGenerator {
                 "$callPrefix.${fn.name}"
             else
                 "$callPrefix.${fn.name}(${if (fn.params.isEmpty()) "" else callArgs})"
-            val returnExpr = fn.returnType.wrapReturnExpr(rawCall, enumNames, dataNames, sealedNames)
+            val returnExpr = fn.returnType.wrapReturnExpr(rawCall, enumNames, dataNames, sealedNames, interfaceNames, abstractNames)
             if (fn.params.isEmpty() && !isFileScope) {
                 appendLine("""    Function("${fn.name}") {""")
             } else {
@@ -519,13 +950,15 @@ object SwiftGenerator {
         sealedNames: Set<String>,
         isInstanceBased: Boolean = false,
         isFileScope: Boolean = false,
+        interfaceNames: Set<String> = emptySet(),
+        abstractNames: Set<String> = emptySet(),
     ) {
         append(formatComment(fn.docComment))
-        val ownParams = fn.params.map { "${it.name}: ${it.type.toSwiftBridgeType(enumNames, dataNames, sealedNames)}" }
+        val ownParams = fn.params.map { "${it.name}: ${it.type.toSwiftBridgeType(enumNames, dataNames, sealedNames, interfaceNames, abstractNames)}" }
         val allParams = (if (isInstanceBased) listOf("instanceId: String") else emptyList()) + ownParams + listOf("promise: Promise")
         val paramList = allParams.joinToString(", ")
         val callArgs  = fn.params.joinToString(", ") { p ->
-            val (prefix, arg) = p.type.toSwiftCallArgWithPrefix(p.name, enumNames, dataNames, sealedNames)
+            val (prefix, arg) = p.type.toSwiftCallArgWithPrefix(p.name, enumNames, dataNames, sealedNames, interfaceNames, abstractNames)
             "${p.name}: ${prefix}$arg"
         }
         val throwsClause = if (fn.needsThrows(enumNames, dataNames, sealedNames)) " throws" else ""
@@ -535,7 +968,7 @@ object SwiftGenerator {
             appendLine("      guard let inst = self.instances[instanceId] else { fatalError(\"Instance not found: \\(instanceId)\") }")
             val skieTarget = if (fn.returnType is KmpTypeRef.TypeParam) "skie(inst)" else "inst"
             val rawCall    = "$skieTarget.${fn.name}(${if (fn.params.isEmpty()) "" else callArgs})"
-            val returnExpr = fn.returnType.wrapReturnExpr(rawCall, enumNames, dataNames, sealedNames)
+            val returnExpr = fn.returnType.wrapReturnExpr(rawCall, enumNames, dataNames, sealedNames, interfaceNames, abstractNames)
             appendLine("      Task { [weak self] in")
             appendLine("        guard let self else { return }")
             appendLine("        do {")
@@ -550,7 +983,7 @@ object SwiftGenerator {
             val callPrefix = if (isFileScope) instance else "self.$instance"
             val callTarget = if (fn.returnType is KmpTypeRef.TypeParam) "skie($callPrefix)" else callPrefix
             val rawCall    = "$callTarget.${fn.name}(${if (fn.params.isEmpty()) "" else callArgs})"
-            val returnExpr = fn.returnType.wrapReturnExpr(rawCall, enumNames, dataNames, sealedNames)
+            val returnExpr = fn.returnType.wrapReturnExpr(rawCall, enumNames, dataNames, sealedNames, interfaceNames, abstractNames)
             appendLine("      Task { [weak self] in")
             appendLine("        guard let self else { return }")
             appendLine("        do {")
@@ -622,10 +1055,12 @@ object SwiftGenerator {
         dataNames: Set<String>,
         sealedNames: Set<String>,
         extraParams: Int = 0,
+        interfaceNames: Set<String> = emptySet(),
+        abstractNames: Set<String> = emptySet(),
     ): Boolean {
         if (params.size + extraParams > MAX_EXPO_FUNCTION_PARAMS) return false
-        if (!returnType.isSwiftBridgeable(enumNames, dataNames, sealedNames)) return false
-        return params.all { it.type.isSwiftBridgeable(enumNames, dataNames, sealedNames) }
+        if (!returnType.isSwiftBridgeable(enumNames, dataNames, sealedNames, interfaceNames, abstractNames)) return false
+        return params.all { it.type.isSwiftBridgeable(enumNames, dataNames, sealedNames, interfaceNames, abstractNames) }
     }
 
     private fun KmpFunction.needsThrows(
@@ -641,15 +1076,18 @@ object SwiftGenerator {
         enumNames: Set<String>,
         dataNames: Set<String>,
         sealedNames: Set<String>,
+        interfaceNames: Set<String> = emptySet(),
+        abstractNames: Set<String> = emptySet(),
     ): Boolean = when {
         this is KmpTypeRef.Primitive      -> true
         this is KmpTypeRef.UnitType       -> true
-        this is KmpTypeRef.ClassRef       -> simpleName in enumNames || simpleName in dataNames || simpleName in sealedNames
+        this is KmpTypeRef.ClassRef       -> simpleName in enumNames || simpleName in dataNames || simpleName in sealedNames ||
+            simpleName in interfaceNames || simpleName in abstractNames
         this is KmpTypeRef.CollectionType -> typeArgs.all { arg ->
             when (arg) {
-                is KmpTypeArg.Invariant     -> arg.type.isSwiftBridgeable(enumNames, dataNames, sealedNames)
-                is KmpTypeArg.Covariant     -> arg.type.isSwiftBridgeable(enumNames, dataNames, sealedNames)
-                is KmpTypeArg.Contravariant -> arg.type.isSwiftBridgeable(enumNames, dataNames, sealedNames)
+                is KmpTypeArg.Invariant     -> arg.type.isSwiftBridgeable(enumNames, dataNames, sealedNames, interfaceNames, abstractNames)
+                is KmpTypeArg.Covariant     -> arg.type.isSwiftBridgeable(enumNames, dataNames, sealedNames, interfaceNames, abstractNames)
+                is KmpTypeArg.Contravariant -> arg.type.isSwiftBridgeable(enumNames, dataNames, sealedNames, interfaceNames, abstractNames)
                 KmpTypeArg.Star             -> true  // star → Any/AnyHashable, always bridgeable
             }
         }
@@ -663,6 +1101,8 @@ object SwiftGenerator {
         enumNames: Set<String>,
         dataNames: Set<String>,
         sealedNames: Set<String>,
+        interfaceNames: Set<String> = emptySet(),
+        abstractNames: Set<String> = emptySet(),
     ): String {
         val base = when {
             this is KmpTypeRef.Primitive -> when (kind) {
@@ -679,6 +1119,8 @@ object SwiftGenerator {
             this is KmpTypeRef.UnitType -> "Void"
             this is KmpTypeRef.ClassRef && simpleName in enumNames  -> "String"
             this is KmpTypeRef.ClassRef && (simpleName in dataNames || simpleName in sealedNames) -> "${simpleName}Record"
+            this is KmpTypeRef.ClassRef && simpleName in interfaceNames -> "String"
+            this is KmpTypeRef.ClassRef && simpleName in abstractNames  -> "String"
             this is KmpTypeRef.CollectionType -> when (kind) {
                 CollectionKind.LIST, CollectionKind.SET -> {
                     val elem = typeArgs.firstOrNull().toSwiftTypeArgString(enumNames, dataNames, sealedNames) ?: "Any"
@@ -713,6 +1155,8 @@ object SwiftGenerator {
         enumNames: Set<String>,
         dataNames: Set<String>,
         sealedNames: Set<String>,
+        interfaceNames: Set<String> = emptySet(),
+        abstractNames: Set<String> = emptySet(),
     ): Pair<String, String> = when {
         this is KmpTypeRef.Primitive && kind == PrimitiveKind.LONG ->
             "" to if (isNullable) "$paramName.map { Int64(\$0) }" else "Int64($paramName)"
@@ -732,6 +1176,12 @@ object SwiftGenerator {
             "try " to if (isNullable) "$paramName.map { try decode${simpleName}(\$0) }" else "decode${simpleName}($paramName)"
         this is KmpTypeRef.ClassRef && (simpleName in dataNames || simpleName in sealedNames) ->
             "try " to if (isNullable) "$paramName?.toKmp()" else "$paramName.toKmp()"
+        this is KmpTypeRef.ClassRef && simpleName in interfaceNames ->
+            "" to if (isNullable) "$paramName.flatMap { ${simpleName}Module._instances[\$0] }"
+                   else "${simpleName}Module._instances[$paramName]!"
+        this is KmpTypeRef.ClassRef && simpleName in abstractNames ->
+            "" to if (isNullable) "$paramName.flatMap { ${simpleName}Module._instances[\$0] }"
+                   else "${simpleName}Module._instances[$paramName]!"
         else -> "" to paramName
     }
 
@@ -740,11 +1190,17 @@ object SwiftGenerator {
         enumNames: Set<String>,
         dataNames: Set<String>,
         sealedNames: Set<String>,
+        interfaceNames: Set<String> = emptySet(),
+        abstractNames: Set<String> = emptySet(),
     ): String = when {
         this is KmpTypeRef.ClassRef && simpleName in enumNames ->
             if (isNullable) "$rawCall?.name" else "$rawCall.name"
         this is KmpTypeRef.ClassRef && (simpleName in dataNames || simpleName in sealedNames) ->
             if (isNullable) "$rawCall.map { toRecord(\$0) }" else "toRecord($rawCall)"
+        this is KmpTypeRef.ClassRef && simpleName in interfaceNames ->
+            if (isNullable) "$rawCall.map { ${simpleName}Module._register(\$0) }" else "${simpleName}Module._register($rawCall)"
+        this is KmpTypeRef.ClassRef && simpleName in abstractNames ->
+            if (isNullable) "$rawCall.map { ${simpleName}Module._register(\$0) }" else "${simpleName}Module._register($rawCall)"
         this is KmpTypeRef.Primitive && kind == PrimitiveKind.CHAR ->
             if (isNullable) "$rawCall?.description" else "$rawCall.description"
         this is KmpTypeRef.CollectionType -> {

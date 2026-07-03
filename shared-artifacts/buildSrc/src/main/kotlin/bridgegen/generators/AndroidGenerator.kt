@@ -6,6 +6,18 @@ object AndroidGenerator {
 
     // ── File-level generation ─────────────────────────────────────────────────
 
+    /**
+     * Generates the full contents of one Android bridge Kotlin file for a single KMP source file.
+     *
+     * Emits, in order: `Record` classes for bridged data classes, sealed-class codecs, and
+     * `Module()` classes for every bridgeable class/object/file-scope declaration and every
+     * interface/abstract class registry. Declarations that cannot be bridged (empty
+     * classes/objects, fieldless data classes, member functions on data/sealed classes) are
+     * skipped with a message reported via [onSkip] rather than failing the build.
+     *
+     * @return the complete file text (header + package + imports + bodies), or `""` if this
+     *         source file contributes nothing to the Android bridge.
+     */
     fun generateFile(sourceFile: KmpSourceFile, module: KmpModule, kmpPackageName: String, androidPackage: String, onSkip: (String) -> Unit = {}): String {
         val enumNames      = module.declarations.filterIsInstance<KmpDeclaration.KmpEnum>().map { it.name }.toSet()
         val dataClassNames = module.declarations.filterIsInstance<KmpDeclaration.KmpDataClass>().map { it.name }.toSet()
@@ -19,16 +31,13 @@ object AndroidGenerator {
                 } else true
             }
         val sealeds = sourceFile.declarations.filterIsInstance<KmpDeclaration.KmpSealedClass>()
+        val interfaceDecls = sourceFile.declarations.filter { decl ->
+            decl is KmpDeclaration.KmpInterface || (decl is KmpDeclaration.KmpClass && decl.isAbstract)
+        }
         val modules = sourceFile.declarations.filter { decl ->
             when {
-                decl is KmpDeclaration.KmpInterface -> {
-                    onSkip("CLASS SKIPPED: ${decl.name} — interfaces are not bridged.")
-                    false
-                }
-                decl is KmpDeclaration.KmpClass && decl.isAbstract -> {
-                    onSkip("CLASS SKIPPED: ${decl.name} — abstract classes are not bridged.")
-                    false
-                }
+                decl is KmpDeclaration.KmpInterface -> false
+                decl is KmpDeclaration.KmpClass && decl.isAbstract -> false
                 decl is KmpDeclaration.KmpClass && decl.functions.isEmpty() -> {
                     onSkip("CLASS SKIPPED: ${decl.name} — no functions to bridge.")
                     false
@@ -59,7 +68,7 @@ object AndroidGenerator {
             }
         }
 
-        if (records.isEmpty() && sealeds.isEmpty() && modules.isEmpty()) return ""
+        if (records.isEmpty() && sealeds.isEmpty() && modules.isEmpty() && interfaceDecls.isEmpty()) return ""
 
         val allImports   = mutableSetOf<String>()
         val recordBodies = mutableListOf<String>()
@@ -86,6 +95,12 @@ object AndroidGenerator {
             moduleBodies.add(body)
         }
 
+        for (decl in interfaceDecls) {
+            val (imports, body) = buildInterfaceModuleBody(decl, module, kmpPackageName, enumNames, dataClassNames, sealedNames, onSkip)
+            allImports.addAll(imports)
+            moduleBodies.add(body)
+        }
+
         val sb = StringBuilder()
         sb.appendLine(HEADER)
         sb.appendLine("package $androidPackage")
@@ -108,6 +123,17 @@ object AndroidGenerator {
 
     // ── Record generation (data classes) ─────────────────────────────────────
 
+    /**
+     * Generates the Expo `Record` class and `toKmp()`/`toRecord()` conversion functions for a
+     * bridged Kotlin data class.
+     *
+     * The `Record` subclass is the JS → Kotlin direction (Expo populates its `@Field`s from the
+     * JS object); `toKmp()` converts that Record into the real KMP data class; `toRecord()` is
+     * the reverse conversion used when returning the data class to JS.
+     *
+     * @return the set of fully-qualified imports the generated code requires, paired with the
+     *         generated Kotlin source text (record class + conversion functions).
+     */
     fun generateRecord(
         decl: KmpDeclaration.KmpDataClass,
         module: KmpModule,
@@ -160,6 +186,19 @@ object AndroidGenerator {
 
     // ── Sealed codec generation ───────────────────────────────────────────────
 
+    /**
+     * Generates the flat `Record` type and `toRecord()`/`toKmp()` codec for a sealed class
+     * hierarchy.
+     *
+     * All variant fields across the hierarchy are unioned into a single nullable-field Record
+     * with a `type` discriminator string naming the variant. Fields that share a name across
+     * variants are deduplicated by first occurrence (see the verification doc for the caveat
+     * this introduces when types differ across variants). Abstract variants encode fine but
+     * throw on decode, since there is no way to know which concrete subclass to reconstruct.
+     *
+     * @return the set of fully-qualified imports required, paired with the generated codec
+     *         source.
+     */
     private fun generateSealedCodec(
         decl: KmpDeclaration.KmpSealedClass,
         kmpPackageName: String,
@@ -254,6 +293,23 @@ object AndroidGenerator {
 
     // ── Module body generation ────────────────────────────────────────────────
 
+    /**
+     * Generates the Expo `Module()` class that bridges one class, object, or file-scope
+     * declaration.
+     *
+     * Objects and file-scope declarations call straight through to the singleton/package;
+     * classes are instance-based and tracked in an `instances` map keyed by a generated instance
+     * id created via a `create` bridge function (and torn down via `destroy`). When a class has
+     * any suspend or Flow function, instances are wrapped in a per-instance holder pairing the
+     * instance with its own `CoroutineScope` so `destroy()` can cancel exactly that instance's
+     * in-flight work (see the `useHolder` branch below).
+     *
+     * @param moduleNameOverride used to disambiguate a file-scope module from a same-named class
+     *        in the same source file (appends a `Kt` suffix), mirroring the Kotlin compiler's
+     *        own `FilenameKt` facade naming.
+     * @return the set of fully-qualified imports required, paired with the generated module
+     *         source.
+     */
     private fun buildModuleBody(
         decl: KmpDeclaration,
         module: KmpModule,
@@ -275,6 +331,8 @@ object AndroidGenerator {
         val hasFlows   = flows.isNotEmpty()
         val eventNames = flows.map { "on${it.flowBaseName.cap()}Update" }
         val usedEnums  = enumNames.filter { eName -> functions.any { fn -> fn.referencesEnum(eName) } }
+        val interfaceNames = module.declarations.filterIsInstance<KmpDeclaration.KmpInterface>().map { it.name }.toSet()
+        val abstractNames  = module.declarations.filterIsInstance<KmpDeclaration.KmpClass>().filter { it.isAbstract }.map { it.name }.toSet()
         // callTarget: object → type name (singleton), file scope → package name (FQN call), class → unused (uses instance map)
         val callTarget = when {
             isObject    -> name
@@ -378,8 +436,8 @@ object AndroidGenerator {
         for (fn in functions) {
             sb.appendLine()
             when (fn.kind) {
-                FunctionKind.SYNC    -> sb.append(syncFunction(fn, callTarget, enumNames, dataClassNames, sealedNames, onSkip, isInstanceBased = isInstanceBased, useHolder = useHolder))
-                FunctionKind.SUSPEND -> sb.append(suspendFunction(fn, callTarget, enumNames, dataClassNames, sealedNames, onSkip, isInstanceBased = isInstanceBased, useHolder = useHolder))
+                FunctionKind.SYNC    -> sb.append(syncFunction(fn, callTarget, enumNames, dataClassNames, sealedNames, onSkip, isInstanceBased = isInstanceBased, useHolder = useHolder, interfaceNames = interfaceNames, abstractNames = abstractNames))
+                FunctionKind.SUSPEND -> sb.append(suspendFunction(fn, callTarget, enumNames, dataClassNames, sealedNames, onSkip, isInstanceBased = isInstanceBased, useHolder = useHolder, interfaceNames = interfaceNames, abstractNames = abstractNames))
                 FunctionKind.FLOW    -> sb.append(flowFunctions(fn, callTarget, enumNames, dataClassNames, sealedNames, useHolder = useHolder))
             }
         }
@@ -390,8 +448,204 @@ object AndroidGenerator {
         return imports to sb.toString()
     }
 
+    // ── Interface registry module body ────────────────────────────────────────
+
+    /**
+     * Generates the registry object + Expo `Module()` for a bridged `interface` or
+     * `abstract class`.
+     *
+     * Because an interface/abstract type has no concrete instance of its own, instances are held
+     * in an internal `<Name>Registry` singleton keyed by instance id, so both directions of use
+     * are supported from the same registry:
+     *  - **KMP-implemented**: a concrete instance obtained elsewhere (e.g. returned from another
+     *    bridged function) is registered and its id handed to JS as an opaque handle; further JS
+     *    calls dispatch back through the registry via that id.
+     *  - **JS-implemented**: `create()` builds an anonymous KMP object whose suspend functions
+     *    proxy to JS — each call emits a `call<Fn>` event carrying a `callId`, blocks on a
+     *    `CompletableDeferred`, and a matching `resolve<Fn>` bridge function (called by JS once
+     *    it has a result) completes that deferred.
+     *
+     * Sync functions cannot be JS-implemented (no way to block JS synchronously) and throw if
+     * called on a JS-backed instance; Flow functions are not yet supported for JS-implemented
+     * instances.
+     *
+     * @return the set of fully-qualified imports required, paired with the generated registry +
+     *         module source.
+     */
+    private fun buildInterfaceModuleBody(
+        decl: KmpDeclaration,
+        module: KmpModule,
+        kmpPackageName: String,
+        enumNames: Set<String>,
+        dataClassNames: Set<String>,
+        sealedNames: Set<String>,
+        onSkip: (String) -> Unit = {},
+    ): Pair<Set<String>, String> {
+        val name = decl.declName()
+        val functions = decl.declFunctions()
+        val registryName = "${name}Registry"
+
+        val flows = functions.filter { it.kind == FunctionKind.FLOW }
+        val hasSuspend = functions.any { it.kind == FunctionKind.SUSPEND }
+        val hasFlows = flows.isNotEmpty()
+        val eventNames = flows.map { "on${it.flowBaseName.cap()}Update" } +
+            functions.filter { it.kind == FunctionKind.SUSPEND }.map { "call${it.name.cap()}" }
+        val usedEnums = enumNames.filter { eName -> functions.any { fn -> fn.referencesEnum(eName) } }
+        val interfaceNames = module.declarations.filterIsInstance<KmpDeclaration.KmpInterface>().map { it.name }.toSet()
+        val abstractNames  = module.declarations.filterIsInstance<KmpDeclaration.KmpClass>().filter { it.isAbstract }.map { it.name }.toSet()
+
+        val imports = mutableSetOf<String>()
+        imports.add("$kmpPackageName.$name")
+        for (eName in usedEnums) imports.add("$kmpPackageName.$eName")
+        imports.add("expo.modules.kotlin.modules.Module")
+        imports.add("expo.modules.kotlin.modules.ModuleDefinition")
+        if (hasSuspend) imports.add("expo.modules.kotlin.Promise")
+        imports.add("kotlinx.coroutines.CompletableDeferred")
+        imports.add("kotlinx.coroutines.CoroutineScope")
+        imports.add("kotlinx.coroutines.Dispatchers")
+        imports.add("kotlinx.coroutines.Job")
+        imports.add("kotlinx.coroutines.SupervisorJob")
+        imports.add("kotlinx.coroutines.cancel")
+        imports.add("kotlinx.coroutines.launch")
+        if (hasFlows) imports.add("kotlinx.coroutines.flow.collect")
+        imports.add("java.util.UUID")
+        imports.add("java.util.concurrent.ConcurrentHashMap")
+
+        val sb = StringBuilder()
+
+        sb.appendLine("internal object $registryName {")
+        if (hasFlows) {
+            val enumCases = flows.joinToString(", ") { it.flowBaseName.toSnakeUpperCase() }
+            sb.appendLine("  enum class FlowKey { $enumCases }")
+        }
+        sb.appendLine("  class Holder(val instance: $name) {")
+        sb.appendLine("    val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())")
+        if (hasFlows) sb.appendLine("    val flowJobs = mutableMapOf<FlowKey, Job>()")
+        sb.appendLine("    val pendingCalls = ConcurrentHashMap<String, CompletableDeferred<Any?>>()")
+        sb.appendLine("  }")
+        sb.appendLine("  private val holders = ConcurrentHashMap<String, Holder>()")
+        sb.appendLine()
+        sb.appendLine("  fun register(instance: $name): String {")
+        sb.appendLine("    val id = UUID.randomUUID().toString()")
+        sb.appendLine("    holders[id] = Holder(instance)")
+        sb.appendLine("    return id")
+        sb.appendLine("  }")
+        sb.appendLine()
+        sb.appendLine("  fun registerWithId(id: String, instance: $name) {")
+        sb.appendLine("    holders[id] = Holder(instance)")
+        sb.appendLine("  }")
+        sb.appendLine()
+        sb.appendLine("  fun get(instanceId: String): Holder =")
+        sb.appendLine("    holders[instanceId] ?: error(\"No $name instance for id: \$instanceId\")")
+        sb.appendLine()
+        sb.appendLine("  fun release(instanceId: String) {")
+        sb.appendLine("    holders.remove(instanceId)?.scope?.cancel()")
+        sb.appendLine("  }")
+        sb.appendLine("}")
+        sb.appendLine()
+
+        sb.appendLine("class ${name}Module : Module() {")
+        sb.appendLine()
+        sb.appendLine("  override fun definition() = ModuleDefinition {")
+        sb.appendLine("""    Name("$name")""")
+
+        if (eventNames.isNotEmpty()) {
+            sb.appendLine()
+            sb.appendLine("""    Events(${eventNames.joinToString(", ") { "\"$it\"" }})""")
+        }
+
+        sb.appendLine()
+        sb.appendLine("""    Function("destroy") { instanceId: String ->""")
+        sb.appendLine("      $registryName.release(instanceId)")
+        sb.appendLine("    }")
+
+        for (fn in functions) {
+            sb.appendLine()
+            when (fn.kind) {
+                FunctionKind.SYNC    -> sb.append(syncFunction(fn, "", enumNames, dataClassNames, sealedNames, onSkip, isInstanceBased = true, useHolder = false, registryName = registryName, interfaceNames = interfaceNames, abstractNames = abstractNames))
+                FunctionKind.SUSPEND -> sb.append(suspendFunction(fn, "", enumNames, dataClassNames, sealedNames, onSkip, isInstanceBased = true, useHolder = false, registryName = registryName, interfaceNames = interfaceNames, abstractNames = abstractNames))
+                FunctionKind.FLOW    -> sb.append(flowFunctions(fn, "", enumNames, dataClassNames, sealedNames, useHolder = false, registryName = registryName))
+            }
+        }
+
+        // ── Task 5: JS-implemented interface ─────────────────────────────────────
+        val isAbstractClass = decl is KmpDeclaration.KmpClass && (decl as KmpDeclaration.KmpClass).isAbstract
+        val implBase = if (isAbstractClass) "$name()" else name
+        val suspendFns = functions.filter { it.kind == FunctionKind.SUSPEND }
+
+        sb.appendLine()
+        sb.appendLine("""    Function("create") {""")
+        sb.appendLine("      val instanceId = UUID.randomUUID().toString()")
+        sb.appendLine("      val emitEvent = { eventName: String, body: Map<String, Any?> -> sendEvent(eventName, body) }")
+        sb.appendLine("      val impl = object : $implBase {")
+        for (fn in functions) {
+            val pList = fn.params.joinToString(", ") { "${it.name}: ${it.type.toKotlinTypeName()}" }
+            val retT  = fn.returnType.toKotlinTypeName()
+            when (fn.kind) {
+                FunctionKind.SYNC -> {
+                    sb.appendLine("""        override fun ${fn.name}($pList): $retT = throw UnsupportedOperationException("${fn.name} is sync — cannot be JS-implemented")""")
+                }
+                FunctionKind.SUSPEND -> {
+                    val isUnit = fn.returnType is KmpTypeRef.UnitType
+                    val eventName = "call${fn.name.cap()}"
+                    val paramMapEntries = buildString {
+                        append(""""instanceId" to instanceId, "callId" to callId""")
+                        for (p in fn.params) append(""", "${p.name}" to ${p.name}""")
+                    }
+                    val castExpr = fn.returnType.toKmpCastFromDeferred(enumNames, dataClassNames, sealedNames)
+                    sb.appendLine("        override suspend fun ${fn.name}($pList): $retT {")
+                    sb.appendLine("          val callId = UUID.randomUUID().toString()")
+                    sb.appendLine("          val deferred = CompletableDeferred<Any?>()")
+                    sb.appendLine("          ${registryName}.get(instanceId).pendingCalls[callId] = deferred")
+                    sb.appendLine("""          emitEvent("$eventName", mapOf($paramMapEntries))""")
+                    if (isUnit) sb.appendLine("          deferred.await()")
+                    else        sb.appendLine("          return $castExpr")
+                    sb.appendLine("        }")
+                }
+                FunctionKind.FLOW -> {
+                    val elemType = fn.returnType.toKotlinTypeName()
+                    sb.appendLine("""        override fun ${fn.name}($pList): kotlinx.coroutines.flow.Flow<$elemType> = throw UnsupportedOperationException("${fn.name} is Flow — JS implementation not yet supported")""")
+                }
+            }
+        }
+        sb.appendLine("      }")
+        sb.appendLine("      ${registryName}.registerWithId(instanceId, impl)")
+        sb.appendLine("      instanceId")
+        sb.appendLine("    }")
+
+        for (fn in suspendFns) {
+            val resolveName = "resolve${fn.name.cap()}"
+            val resultType  = fn.returnType.toResolveParamType(enumNames, dataClassNames, sealedNames)
+            sb.appendLine()
+            if (resultType == null) {
+                sb.appendLine("""    Function("$resolveName") { instanceId: String, callId: String ->""")
+                sb.appendLine("      ${registryName}.get(instanceId).pendingCalls.remove(callId)?.complete(null)")
+            } else {
+                sb.appendLine("""    Function("$resolveName") { instanceId: String, callId: String, result: $resultType ->""")
+                sb.appendLine("      ${registryName}.get(instanceId).pendingCalls.remove(callId)?.complete(result)")
+            }
+            sb.appendLine("    }")
+        }
+
+        sb.appendLine("  }")
+        sb.append("}")
+
+        return imports to sb.toString()
+    }
+
     // ── Function emitters ─────────────────────────────────────────────────────
 
+    /**
+     * Emits one Expo `Function("name") { ... }` block for a [FunctionKind.SYNC] KMP function.
+     *
+     * For instance-based declarations, an `instanceId: String` is prepended to the parameter
+     * list and used to look up the backing instance (via [registryName], a per-instance holder
+     * when [useHolder] is set, or a plain instance map otherwise).
+     *
+     * @return the generated `Function(...)` block, or a `// BRIDGE SKIPPED` comment line if the
+     *         effective parameter count (including the synthetic `instanceId`) exceeds
+     *         [MAX_EXPO_FUNCTION_PARAMS].
+     */
     private fun syncFunction(
         fn: KmpFunction,
         callTarget: String,
@@ -401,6 +655,9 @@ object AndroidGenerator {
         onSkip: (String) -> Unit = {},
         isInstanceBased: Boolean = false,
         useHolder: Boolean = false,
+        registryName: String? = null,
+        interfaceNames: Set<String> = emptySet(),
+        abstractNames: Set<String> = emptySet(),
     ): String {
         val effectiveParamCount = fn.params.size + if (isInstanceBased) 1 else 0
         if (effectiveParamCount > MAX_EXPO_FUNCTION_PARAMS) {
@@ -409,14 +666,15 @@ object AndroidGenerator {
             return "    // $msg\n"
         }
         val sb  = StringBuilder()
-        val ret = fn.returnType.toReturnSuffix(enumNames, dataClassNames, sealedNames)
+        val ret = fn.returnType.toReturnSuffix(enumNames, dataClassNames, sealedNames, interfaceNames, abstractNames)
         val instanceExpr = when {
+            registryName != null -> "$registryName.get(instanceId).instance"
             useHolder      -> "(instances[instanceId] ?: error(\"Instance not found: \$instanceId\")).instance"
             isInstanceBased -> "(instances[instanceId] ?: error(\"Instance not found: \$instanceId\"))"
             else            -> callTarget
         }
-        val ownParams = fn.params.joinToString(", ") { "${it.name}: ${it.type.toBridgeParamType(enumNames)}" }
-        val callArgs  = fn.params.joinToString(", ") { it.type.toCallArg(it.name, enumNames) }
+        val ownParams = fn.params.joinToString(", ") { "${it.name}: ${it.type.toBridgeParamType(enumNames, interfaceNames, abstractNames)}" }
+        val callArgs  = fn.params.joinToString(", ") { it.type.toCallArg(it.name, enumNames, interfaceNames, abstractNames) }
         sb.append(formatComment(fn.docComment))
         if (!isInstanceBased && fn.params.isEmpty()) {
             sb.appendLine("""    Function("${fn.name}") {""")
@@ -436,6 +694,18 @@ object AndroidGenerator {
         return sb.toString()
     }
 
+    /**
+     * Emits one Expo `AsyncFunction("name") { ... }` block for a [FunctionKind.SUSPEND] KMP
+     * function.
+     *
+     * Launches the suspend call on the owning `CoroutineScope` (module-level, per-instance
+     * holder, or interface [registryName] holder) and resolves/rejects the trailing
+     * `promise: Promise` parameter with the result or a caught exception, tagged with an
+     * `<FUNCTION_NAME>_ERROR` code.
+     *
+     * @return the generated `AsyncFunction(...)` block, or a `// BRIDGE SKIPPED` comment line if
+     *         the effective parameter count exceeds [MAX_EXPO_FUNCTION_PARAMS].
+     */
     private fun suspendFunction(
         fn: KmpFunction,
         callTarget: String,
@@ -445,6 +715,9 @@ object AndroidGenerator {
         onSkip: (String) -> Unit = {},
         isInstanceBased: Boolean = false,
         useHolder: Boolean = false,
+        registryName: String? = null,
+        interfaceNames: Set<String> = emptySet(),
+        abstractNames: Set<String> = emptySet(),
     ): String {
         val effectiveParamCount = fn.params.size + if (isInstanceBased) 1 else 0
         if (effectiveParamCount > MAX_EXPO_FUNCTION_PARAMS) {
@@ -454,15 +727,20 @@ object AndroidGenerator {
         }
         val sb       = StringBuilder()
         val errorTag = "${fn.name.toSnakeUpperCase()}_ERROR"
-        val ret      = fn.returnType.toReturnSuffix(enumNames, dataClassNames, sealedNames)
-        val ownParams = fn.params.map { "${it.name}: ${it.type.toBridgeParamType(enumNames)}" }
+        val ret      = fn.returnType.toReturnSuffix(enumNames, dataClassNames, sealedNames, interfaceNames, abstractNames)
+        val ownParams = fn.params.map { "${it.name}: ${it.type.toBridgeParamType(enumNames, interfaceNames, abstractNames)}" }
         val allParams = (if (isInstanceBased) listOf("instanceId: String") else emptyList()) + ownParams + listOf("promise: Promise")
         val paramList = allParams.joinToString(", ")
-        val callArgs  = fn.params.joinToString(", ") { it.type.toCallArg(it.name, enumNames) }
+        val callArgs  = fn.params.joinToString(", ") { it.type.toCallArg(it.name, enumNames, interfaceNames, abstractNames) }
 
         sb.append(formatComment(fn.docComment))
         sb.appendLine("""    AsyncFunction("${fn.name}") { $paramList ->""")
-        if (useHolder) {
+        if (registryName != null) {
+            sb.appendLine("      val holder = $registryName.get(instanceId)")
+            sb.appendLine("      holder.scope.launch {")
+            sb.appendLine("        try {")
+            sb.appendLine("          promise.resolve(holder.instance.${fn.name}($callArgs)$ret)")
+        } else if (useHolder) {
             sb.appendLine("      val holder = instances[instanceId] ?: error(\"Instance not found: \$instanceId\")")
             sb.appendLine("      holder.scope.launch {")
             sb.appendLine("        try {")
@@ -481,6 +759,16 @@ object AndroidGenerator {
         return sb.toString()
     }
 
+    /**
+     * Emits the `start<Name>` / `stop<Name>` Expo `Function` pair for a [FunctionKind.FLOW] KMP
+     * function.
+     *
+     * `start<Name>` cancels any existing collection job for this flow key, launches a new
+     * coroutine that collects the Kotlin `Flow` and forwards each element as an `on<Name>Update`
+     * event (converting enums/data classes/sealed classes to their wire representation where
+     * applicable), and tracks the job by flow key so `stop<Name>` (or `destroy`) can cancel it.
+     * Instance-based declarations key jobs per instance via [useHolder] / [registryName].
+     */
     private fun flowFunctions(
         fn: KmpFunction,
         callTarget: String,
@@ -488,12 +776,13 @@ object AndroidGenerator {
         dataClassNames: Set<String> = emptySet(),
         sealedNames: Set<String> = emptySet(),
         useHolder: Boolean = false,
+        registryName: String? = null,
     ): String {
         val sb        = StringBuilder()
         val base      = fn.flowBaseName
         val Cap       = base.cap()
         val eventName = "on${Cap}Update"
-        val enumKey   = "FlowKey.${base.toSnakeUpperCase()}"
+        val enumKey   = if (registryName != null) "$registryName.FlowKey.${base.toSnakeUpperCase()}" else "FlowKey.${base.toSnakeUpperCase()}"
         val retType   = fn.returnType
         val emit = when {
             retType is KmpTypeRef.Primitive && retType.kind == PrimitiveKind.CHAR              -> "value.toString()"
@@ -504,7 +793,23 @@ object AndroidGenerator {
         }
 
         sb.append(formatComment(fn.docComment))
-        if (useHolder) {
+        if (registryName != null) {
+            sb.appendLine("""    Function("start$Cap") { instanceId: String ->""")
+            sb.appendLine("      val holder = $registryName.get(instanceId)")
+            sb.appendLine("      holder.flowJobs[$enumKey]?.cancel()")
+            sb.appendLine("      holder.flowJobs[$enumKey] = holder.scope.launch {")
+            sb.appendLine("        holder.instance.${fn.name}().collect { value ->")
+            sb.appendLine("""          sendEvent("$eventName", mapOf("instanceId" to instanceId, "value" to $emit))""")
+            sb.appendLine("        }")
+            sb.appendLine("      }")
+            sb.appendLine("    }")
+            sb.appendLine()
+            sb.appendLine("""    Function("stop$Cap") { instanceId: String ->""")
+            sb.appendLine("      val holder = $registryName.get(instanceId)")
+            sb.appendLine("      holder.flowJobs[$enumKey]?.cancel()")
+            sb.appendLine("      holder.flowJobs.remove($enumKey)")
+            sb.appendLine("    }")
+        } else if (useHolder) {
             sb.appendLine("""    Function("start$Cap") { instanceId: String ->""")
             sb.appendLine("      val holder = instances[instanceId] ?: error(\"Instance not found: \$instanceId\")")
             sb.appendLine("      holder.flowJobs[$enumKey]?.cancel()")
@@ -549,6 +854,10 @@ object AndroidGenerator {
     ): String = when {
         this is KmpTypeRef.Primitive && kind == PrimitiveKind.LONG ->
             if (nullable) "$fieldName?.toDouble()" else "$fieldName.toDouble()"
+        this is KmpTypeRef.Primitive && kind == PrimitiveKind.BYTE ->
+            if (nullable) "$fieldName?.toInt()" else "$fieldName.toInt()"
+        this is KmpTypeRef.Primitive && kind == PrimitiveKind.SHORT ->
+            if (nullable) "$fieldName?.toInt()" else "$fieldName.toInt()"
         this is KmpTypeRef.Primitive && kind == PrimitiveKind.CHAR ->
             if (nullable) "$fieldName?.toString()" else "$fieldName.toString()"
         this is KmpTypeRef.Primitive -> fieldName
@@ -563,6 +872,13 @@ object AndroidGenerator {
 
     // ── Sealed Record field type (always nullable) ────────────────────────────
 
+    /**
+     * Maps a KMP field type to its nullable Kotlin type in a sealed class's flat `Record`.
+     *
+     * Every field in a sealed Record is nullable regardless of the original field's
+     * nullability, since a given field is only populated for the variant(s) that declare it —
+     * see [generateSealedCodec].
+     */
     private fun KmpTypeRef.toSealedRecordFieldType(
         enumNames: Set<String>,
         dataClassNames: Set<String>,
@@ -604,6 +920,15 @@ object AndroidGenerator {
 
     // ── Extract from nullable sealed Record field → KMP type ──────────────────
 
+    /**
+     * Produces the expression that extracts a KMP-typed value from a nullable sealed Record
+     * field.
+     *
+     * If the original KMP field was itself nullable, the Record value passes through unchanged.
+     * Otherwise a Kotlin-appropriate fallback default (`""`, `0`, `false`, `emptyList()`, ...) is
+     * substituted for a missing/null Record value, since [toSealedRecordFieldType] widens every
+     * field to nullable.
+     */
     private fun KmpTypeRef.fromSealedRecordField(
         fieldName: String,
         enumNames: Set<String>,
@@ -644,12 +969,14 @@ object AndroidGenerator {
 
     // ── Variant helpers ───────────────────────────────────────────────────────
 
+    /** The simple declared name of this sealed class variant. */
     private fun KmpVariant.variantName(): String = when (this) {
         is KmpVariant.DataVariant   -> name
         is KmpVariant.ClassVariant  -> name
         is KmpVariant.ObjectVariant -> name
     }
 
+    /** This variant's constructor fields, or an empty list for an [KmpVariant.ObjectVariant]. */
     private fun KmpVariant.variantFields(): List<KmpField> = when (this) {
         is KmpVariant.DataVariant   -> fields
         is KmpVariant.ClassVariant  -> fields
@@ -658,6 +985,7 @@ object AndroidGenerator {
 
     // ── Record type helpers ───────────────────────────────────────────────────
 
+    /** Whether this type reference is nullable, regardless of which [KmpTypeRef] subtype it is. */
     private val KmpTypeRef.isNullable: Boolean get() = when (this) {
         is KmpTypeRef.Primitive      -> nullable
         is KmpTypeRef.ClassRef       -> nullable
@@ -667,6 +995,11 @@ object AndroidGenerator {
         is KmpTypeRef.TypeParam      -> nullable
     }
 
+    /**
+     * Maps a KMP field type to the Kotlin type used for the corresponding `@Field` in a data
+     * class's Expo `Record` (not the sealed-class flat Record — see [toSealedRecordFieldType]
+     * for that variant).
+     */
     private fun KmpTypeRef.toRecordFieldType(enumNames: Set<String>, dataClassNames: Set<String>): String {
         val q = if (isNullable) "?" else ""
         return when {
@@ -677,8 +1010,8 @@ object AndroidGenerator {
                 PrimitiveKind.DOUBLE  -> "Double"
                 PrimitiveKind.FLOAT   -> "Float"
                 PrimitiveKind.BOOLEAN -> "Boolean"
-                PrimitiveKind.BYTE    -> "Byte"
-                PrimitiveKind.SHORT   -> "Short"
+                PrimitiveKind.BYTE    -> "Int"
+                PrimitiveKind.SHORT   -> "Int"
                 PrimitiveKind.CHAR    -> "String"
             } + q
             this is KmpTypeRef.ClassRef && simpleName in enumNames      -> "String$q"
@@ -707,6 +1040,13 @@ object AndroidGenerator {
         }
     }
 
+    /**
+     * The default value Expo's `Record` requires for a `@Field var` of this type.
+     *
+     * Expo `Record` fields must have a default; nullable fields default to `null`, non-nullable
+     * fields get a type-appropriate zero value (`""`, `0`, `false`, `emptyList()`, a fresh nested
+     * `Record()`, ...).
+     */
     private fun KmpTypeRef.toRecordFieldDefault(enumNames: Set<String>, dataClassNames: Set<String>): String {
         if (isNullable) return "null"
         return when {
@@ -730,6 +1070,15 @@ object AndroidGenerator {
         }
     }
 
+    /**
+     * Produces the expression that converts a Record field's value into the corresponding KMP
+     * field type inside `toKmp()`.
+     *
+     * Handles the primitive widenings JS requires (`Long`→`Double`, `Byte`/`Short`→`Int` on the
+     * wire, `Char`→`String`), enum name lookups, nested data-class conversion, and element-wise
+     * conversion for collections whose elements themselves need one of those conversions (see
+     * [needsConversion] / [singleElemConversion]).
+     */
     private fun KmpTypeRef.toKmpFieldConversion(
         fieldName: String,
         enumNames: Set<String>,
@@ -737,6 +1086,10 @@ object AndroidGenerator {
     ): String = when {
         this is KmpTypeRef.Primitive && kind == PrimitiveKind.LONG ->
             if (nullable) "$fieldName?.toLong()" else "$fieldName.toLong()"
+        this is KmpTypeRef.Primitive && kind == PrimitiveKind.BYTE ->
+            if (nullable) "$fieldName?.toByte()" else "$fieldName.toByte()"
+        this is KmpTypeRef.Primitive && kind == PrimitiveKind.SHORT ->
+            if (nullable) "$fieldName?.toShort()" else "$fieldName.toShort()"
         this is KmpTypeRef.Primitive && kind == PrimitiveKind.CHAR ->
             if (nullable) "$fieldName?.firstOrNull()" else "$fieldName.first()"
         this is KmpTypeRef.ClassRef && simpleName in enumNames ->
@@ -772,6 +1125,11 @@ object AndroidGenerator {
         else -> fieldName
     }
 
+    /**
+     * Whether a collection element of this type requires per-element conversion in
+     * [toKmpFieldConversion] — i.e. it's a `Long`, an enum, or a nested data class, rather than
+     * already being wire-compatible as-is.
+     */
     private fun KmpTypeRef.needsConversion(enumNames: Set<String>, dataClassNames: Set<String>): Boolean = when {
         this is KmpTypeRef.Primitive && kind == PrimitiveKind.LONG -> true
         this is KmpTypeRef.ClassRef  && simpleName in enumNames    -> true
@@ -779,6 +1137,14 @@ object AndroidGenerator {
         else -> false
     }
 
+    /**
+     * The single-element conversion expression used inside a `.map { ... }` /
+     * `.mapValues { ... }` when a collection's element type [needsConversion].
+     *
+     * @param elemVar the loop variable name the conversion expression should reference (defaults
+     *        to Kotlin's implicit `it`; callers pass an explicit name like `v` when both a key
+     *        and a value are in scope).
+     */
     private fun KmpTypeRef.singleElemConversion(
         enumNames: Set<String>,
         dataClassNames: Set<String>,
@@ -790,6 +1156,12 @@ object AndroidGenerator {
         else -> elemVar
     }
 
+    /**
+     * Recursively walks a type reference (including into collection type arguments) and adds an
+     * import for every enum, data class, or sealed class it references.
+     *
+     * @param into the mutable import set being accumulated across the whole declaration.
+     */
     private fun collectClassRefImports(
         type: KmpTypeRef,
         enumNames: Set<String>,
@@ -817,20 +1189,39 @@ object AndroidGenerator {
 
     // ── Return suffix ─────────────────────────────────────────────────────────
 
+    /**
+     * The suffix appended to a KMP function call expression to convert its Kotlin return value
+     * into a bridge-safe value.
+     *
+     * Enums become `.name`, data/sealed classes become `.toRecord()`, and interface/abstract
+     * class return values are registered in their `<Name>Registry` and returned as an opaque
+     * instance id string via `.let { ... }`. Anything else (primitives, collections, `Unit`)
+     * crosses as-is, so this returns `""`.
+     */
     private fun KmpTypeRef.toReturnSuffix(
         enumNames: Set<String>,
         dataClassNames: Set<String> = emptySet(),
         sealedNames: Set<String> = emptySet(),
+        interfaceNames: Set<String> = emptySet(),
+        abstractNames: Set<String> = emptySet(),
     ): String = when {
         this is KmpTypeRef.Primitive && kind == PrimitiveKind.CHAR  -> if (nullable) "?.toString()" else ".toString()"
         this is KmpTypeRef.ClassRef && simpleName in enumNames      -> if (nullable) "?.name" else ".name"
         this is KmpTypeRef.ClassRef && simpleName in dataClassNames -> if (nullable) "?.toRecord()" else ".toRecord()"
         this is KmpTypeRef.ClassRef && simpleName in sealedNames    -> if (nullable) "?.toRecord()" else ".toRecord()"
+        this is KmpTypeRef.ClassRef && simpleName in interfaceNames ->
+            if (nullable) "?.let { ${simpleName}Registry.register(it) }" else ".let { ${simpleName}Registry.register(it) }"
+        this is KmpTypeRef.ClassRef && simpleName in abstractNames  ->
+            if (nullable) "?.let { ${simpleName}Registry.register(it) }" else ".let { ${simpleName}Registry.register(it) }"
         else -> ""
     }
 
     // ── Declaration accessors ─────────────────────────────────────────────────
 
+    /**
+     * The simple name used to identify this declaration in generated code — its class/object
+     * name, or the file name for a [KmpDeclaration.KmpFileScope].
+     */
     private fun KmpDeclaration.declName(): String = when (this) {
         is KmpDeclaration.KmpClass       -> name
         is KmpDeclaration.KmpObject      -> name
@@ -841,6 +1232,10 @@ object AndroidGenerator {
         is KmpDeclaration.KmpFileScope   -> fileName
     }
 
+    /**
+     * The functions to bridge for this declaration; empty for [KmpDeclaration.KmpEnum], which
+     * has no bridgeable functions of its own.
+     */
     private fun KmpDeclaration.declFunctions(): List<KmpFunction> = when (this) {
         is KmpDeclaration.KmpClass       -> functions
         is KmpDeclaration.KmpObject      -> functions
@@ -853,8 +1248,25 @@ object AndroidGenerator {
 
     // ── Bridge param / call arg ───────────────────────────────────────────────
 
-    private fun KmpTypeRef.toBridgeParamType(enumNames: Set<String>): String = when {
+    /**
+     * The Kotlin parameter type used in the generated `Function`/`AsyncFunction` lambda for a
+     * parameter of this KMP type.
+     *
+     * Enums, interfaces, and abstract classes all cross the bridge as a `String` (an enum case
+     * name or a registry instance id); `Long` arrives as a JS `number`, i.e. `Double`; `Char`
+     * arrives as a single-character `String`. Everything else keeps its natural Kotlin type via
+     * [toKotlinTypeName].
+     */
+    private fun KmpTypeRef.toBridgeParamType(
+        enumNames: Set<String>,
+        interfaceNames: Set<String> = emptySet(),
+        abstractNames: Set<String> = emptySet(),
+    ): String = when {
         this is KmpTypeRef.ClassRef && simpleName in enumNames ->
+            if (nullable) "String?" else "String"
+        this is KmpTypeRef.ClassRef && simpleName in interfaceNames ->
+            if (nullable) "String?" else "String"
+        this is KmpTypeRef.ClassRef && simpleName in abstractNames ->
             if (nullable) "String?" else "String"
         this is KmpTypeRef.Primitive && kind == PrimitiveKind.LONG ->
             if (nullable) "Double?" else "Double"
@@ -863,10 +1275,30 @@ object AndroidGenerator {
         else -> toKotlinTypeName()
     }
 
-    private fun KmpTypeRef.toCallArg(paramName: String, enumNames: Set<String>): String = when {
+    /**
+     * The expression that converts a bridge parameter (as typed by [toBridgeParamType]) back
+     * into the real KMP type expected by the underlying function call.
+     *
+     * Mirrors [toBridgeParamType]: reverses the enum-name / registry-id / numeric-widening
+     * conversions applied on the way in.
+     *
+     * @param paramName the generated parameter's identifier in the emitted lambda.
+     */
+    private fun KmpTypeRef.toCallArg(
+        paramName: String,
+        enumNames: Set<String>,
+        interfaceNames: Set<String> = emptySet(),
+        abstractNames: Set<String> = emptySet(),
+    ): String = when {
         this is KmpTypeRef.ClassRef && simpleName in enumNames ->
             if (nullable) "$paramName?.let { ${simpleName}.valueOf(it) }"
             else "${simpleName}.valueOf($paramName)"
+        this is KmpTypeRef.ClassRef && simpleName in interfaceNames ->
+            if (nullable) "$paramName?.let { ${simpleName}Registry.get(it).instance }"
+            else "${simpleName}Registry.get($paramName).instance"
+        this is KmpTypeRef.ClassRef && simpleName in abstractNames ->
+            if (nullable) "$paramName?.let { ${simpleName}Registry.get(it).instance }"
+            else "${simpleName}Registry.get($paramName).instance"
         this is KmpTypeRef.Primitive && kind == PrimitiveKind.LONG ->
             if (nullable) "$paramName?.toLong()" else "$paramName.toLong()"
         this is KmpTypeRef.Primitive && kind == PrimitiveKind.CHAR ->
@@ -874,6 +1306,14 @@ object AndroidGenerator {
         else -> paramName
     }
 
+    /**
+     * The plain Kotlin type name for this type reference, as it would appear in KMP source —
+     * used where no bridge-specific conversion applies (e.g. inside a JS-implemented interface's
+     * anonymous object, or as the fallback branch of [toBridgeParamType]).
+     *
+     * Generic type parameters and `Flow<T>` both erase to `Any`/`Any?`, since Android generation
+     * has no way to recover the concrete type argument.
+     */
     private fun KmpTypeRef.toKotlinTypeName(): String = when (this) {
         is KmpTypeRef.Primitive      -> primitiveKotlinName() + if (nullable) "?" else ""
         is KmpTypeRef.UnitType       -> "Unit"
@@ -893,6 +1333,7 @@ object AndroidGenerator {
         is KmpTypeRef.TypeParam -> if (nullable) "Any?" else "Any"
     }
 
+    /** The unqualified Kotlin type name for this primitive kind (e.g. [PrimitiveKind.INT] → `"Int"`). */
     private fun KmpTypeRef.Primitive.primitiveKotlinName(): String = when (kind) {
         PrimitiveKind.STRING  -> "String"
         PrimitiveKind.INT     -> "Int"
@@ -905,14 +1346,100 @@ object AndroidGenerator {
         PrimitiveKind.CHAR    -> "Char"
     }
 
+    /** The unqualified Kotlin collection interface name for this kind (e.g. [CollectionKind.LIST] → `"List"`). */
     private fun CollectionKind.toClassName(): String = when (this) {
         CollectionKind.LIST -> "List"
         CollectionKind.MAP  -> "Map"
         CollectionKind.SET  -> "Set"
     }
 
+    // ── Task 5 helpers ────────────────────────────────────────────────────────
+
+    /**
+     * The expression that casts a resolved `CompletableDeferred`'s `Any?` result back to this
+     * KMP type, inside a JS-implemented interface's suspend function override.
+     *
+     * The deferred is completed by the matching `resolve<Fn>` bridge function (see
+     * [buildInterfaceModuleBody]) with whatever JS passed for [toResolveParamType]; this is the
+     * inverse conversion, unwrapping the wire representation (`Double` for numerics, an
+     * enum-name `String`, a `Record` for data/sealed classes) back to the real KMP value.
+     */
+    private fun KmpTypeRef.toKmpCastFromDeferred(
+        enumNames: Set<String>,
+        dataClassNames: Set<String>,
+        sealedNames: Set<String>,
+    ): String {
+        val q = if (isNullable) "?" else ""
+        return when {
+            this is KmpTypeRef.UnitType -> "deferred.await()"
+            this is KmpTypeRef.Primitive -> when (kind) {
+                PrimitiveKind.STRING  -> "deferred.await() as$q String"
+                PrimitiveKind.BOOLEAN -> "deferred.await() as$q Boolean"
+                PrimitiveKind.INT     -> "(deferred.await() as Double)$q.toInt()"
+                PrimitiveKind.LONG    -> "(deferred.await() as Double)$q.toLong()"
+                PrimitiveKind.DOUBLE  -> "deferred.await() as$q Double"
+                PrimitiveKind.FLOAT   -> "(deferred.await() as Double)$q.toFloat()"
+                PrimitiveKind.BYTE    -> "(deferred.await() as Double)$q.toInt().toByte()"
+                PrimitiveKind.SHORT   -> "(deferred.await() as Double)$q.toInt().toShort()"
+                PrimitiveKind.CHAR    -> "(deferred.await() as String)$q.first()"
+            }
+            this is KmpTypeRef.ClassRef && simpleName in enumNames ->
+                "${simpleName}.valueOf(deferred.await() as String)"
+            this is KmpTypeRef.ClassRef && simpleName in dataClassNames ->
+                if (nullable) "(deferred.await() as? ${simpleName}Record)?.toKmp()"
+                else "(deferred.await() as ${simpleName}Record).toKmp()"
+            this is KmpTypeRef.ClassRef && simpleName in sealedNames ->
+                if (nullable) "(deferred.await() as? ${simpleName}Record)?.toKmp()"
+                else "(deferred.await() as ${simpleName}Record).toKmp()"
+            else -> "deferred.await()"
+        }
+    }
+
+    /**
+     * The Kotlin parameter type for the `result` parameter of a JS-implemented interface's
+     * `resolve<Fn>` bridge function — i.e. the wire type JS must supply when resolving a pending
+     * suspend call.
+     *
+     * @return `null` for [KmpTypeRef.UnitType], since a `resolve<Fn>` for a `Unit`-returning
+     *         function takes no result parameter at all.
+     */
+    private fun KmpTypeRef.toResolveParamType(
+        enumNames: Set<String>,
+        dataClassNames: Set<String>,
+        sealedNames: Set<String>,
+    ): String? = when {
+        this is KmpTypeRef.UnitType -> null
+        this is KmpTypeRef.Primitive -> {
+            val q = if (nullable) "?" else ""
+            when (kind) {
+                PrimitiveKind.STRING  -> "String$q"
+                PrimitiveKind.BOOLEAN -> "Boolean$q"
+                PrimitiveKind.INT     -> "Int$q"
+                PrimitiveKind.LONG    -> "Double$q"
+                PrimitiveKind.DOUBLE  -> "Double$q"
+                PrimitiveKind.FLOAT   -> "Float$q"
+                PrimitiveKind.BYTE    -> "Int$q"
+                PrimitiveKind.SHORT   -> "Int$q"
+                PrimitiveKind.CHAR    -> "String$q"
+            }
+        }
+        this is KmpTypeRef.ClassRef && simpleName in enumNames ->
+            if (nullable) "String?" else "String"
+        this is KmpTypeRef.ClassRef && simpleName in dataClassNames ->
+            if (nullable) "${simpleName}Record?" else "${simpleName}Record"
+        this is KmpTypeRef.ClassRef && simpleName in sealedNames ->
+            if (nullable) "${simpleName}Record?" else "${simpleName}Record"
+        else -> "Any?"
+    }
+
     // ── Enum reference detection ──────────────────────────────────────────────
 
+    /**
+     * Whether any parameter or the return type of this function references [enumName],
+     * including inside a collection or Flow element type.
+     *
+     * Used to scope a generated file's imports to only the enums actually used by its functions.
+     */
     private fun KmpFunction.referencesEnum(enumName: String): Boolean {
         fun KmpTypeRef.hasEnumRef(): Boolean = when (this) {
             is KmpTypeRef.ClassRef       -> simpleName == enumName
@@ -936,6 +1463,17 @@ object AndroidGenerator {
 
 // ── File-level helpers ────────────────────────────────────────────────────────
 
+/**
+ * Reformats a KMP KDoc/line comment (as captured by the klib reader) into indented `//` line
+ * comments suitable for placing directly above a generated Expo `Function`/`AsyncFunction`
+ * block.
+ *
+ * Strips `/**`, `*/`, leading `*`, and `//` comment markup from each line; blank lines are
+ * dropped entirely.
+ *
+ * @return the reformatted comment block (each line indented by [indent], terminated by a
+ *         trailing newline), or `""` if [docComment] is `null` or contains no non-blank content.
+ */
 private fun formatComment(docComment: String?, indent: String = "    "): String {
     if (docComment == null) return ""
     val lines = docComment.lines().mapNotNull { line ->
@@ -955,8 +1493,13 @@ private fun formatComment(docComment: String?, indent: String = "    "): String 
     return if (lines.isEmpty()) "" else lines.joinToString("\n") + "\n"
 }
 
+/** Uppercases the first character, e.g. for turning a lowerCamelCase name into a type name. */
 private fun String.cap()  = replaceFirstChar { it.uppercase() }
+
+/** Lowercases the first character, e.g. for turning a type name into a lowerCamelCase call target. */
 private fun String.decap() = replaceFirstChar { it.lowercase() }
+
+/** Converts a camelCase identifier to `SCREAMING_SNAKE_CASE`, for enum case / error-tag names. */
 private fun String.toSnakeUpperCase() = replace(Regex("([A-Z])"), "_$1").uppercase().trimStart('_')
 
 // Expo's Function/AsyncFunction DSL has overloads up to this many parameters.
