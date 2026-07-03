@@ -87,7 +87,7 @@ object AndroidGenerator {
             sealedBodies.add(body)
         }
 
-        val takenNames = modules.filter { it !is KmpDeclaration.KmpFileScope }.map { it.declName() }.toSet()
+        val takenNames = (modules.filter { it !is KmpDeclaration.KmpFileScope } + interfaceDecls).map { it.declName() }.toSet()
         for (decl in modules) {
             val nameOverride = if (decl is KmpDeclaration.KmpFileScope && decl.fileName in takenNames) "${decl.fileName}Kt" else null
             val (imports, body) = buildModuleBody(decl, module, kmpPackageName, enumNames, dataClassNames, sealedNames, onSkip, moduleNameOverride = nameOverride)

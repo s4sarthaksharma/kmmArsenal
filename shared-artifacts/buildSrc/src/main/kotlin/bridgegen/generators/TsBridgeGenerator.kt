@@ -154,7 +154,10 @@ object TsBridgeGenerator {
             if (!hasBridgeable) return@buildString
 
             // 5. requireNativeModule instances (one per bridgeable class / object / file scope / interface module)
-            val takenNames = (classes.map { it.name } + objects.map { it.name }).toSet()
+            // Interfaces/abstracts claim their module name on the native side even when they have
+            // no functions (the registry module is always generated), so count all of them.
+            val takenNames = (classes.map { it.name } + objects.map { it.name } +
+                interfaces.map { it.name } + abstracts.map { it.name }).toSet()
             fun scopeName(scope: KmpDeclaration.KmpFileScope) =
                 if (scope.fileName in takenNames) "${scope.fileName}Kt" else scope.fileName
 
