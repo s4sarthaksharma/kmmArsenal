@@ -103,6 +103,15 @@ abstract class FixtureBaseProcessor {
     abstract suspend fun processAsync(input: String): String
 }
 
+/**
+ * Abstract class that CANNOT be JS-implemented: constructor parameter + final concrete function.
+ * The generators must still bridge the KMP-implemented direction but skip create()/resolve.
+ */
+abstract class FixtureConfiguredProcessor(val label: String) {
+    fun describe(): String = "processor:$label"
+    abstract suspend fun run(input: String): String
+}
+
 // ── Concrete class — every primitive as param and return ──────────────────────
 
 class FixturePrimitivesApi {
@@ -269,6 +278,12 @@ class FixtureAsyncApi {
         while (true) { emit(if (i % 2 == 0) "value_$i" else null); i++; delay(1_000) }
     }
 
+    // FLOW with a parameter — start<Name> must thread it through to the flow call
+    fun observeGreeting(prefix: String): Flow<String> = flow {
+        var i = 0
+        while (true) { emit("$prefix $i"); i++; delay(1_000) }
+    }
+
     fun observeMap(): Flow<Map<String, FixtureUser>> = flow {
         val base = FixtureUser("map_u", 30, 7.5, true, 0, 0L, 'M', 0f,
             FixtureStatus.INACTIVE, null, emptyList(), emptyMap(), emptySet())
@@ -389,6 +404,10 @@ class FixtureInterfaceApi {
     fun getProcessor(): FixtureBaseProcessor = object : FixtureBaseProcessor() {
         override fun process(input: String): String = "processed:$input"
         override suspend fun processAsync(input: String): String = "async:$input"
+    }
+
+    fun getConfigured(): FixtureConfiguredProcessor = object : FixtureConfiguredProcessor("fixture") {
+        override suspend fun run(input: String): String = "ran:$input"
     }
 
     fun processRepo(repo: FixtureRepository): String = repo.findById("fixture-param").id

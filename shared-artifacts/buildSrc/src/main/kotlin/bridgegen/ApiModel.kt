@@ -91,6 +91,11 @@ sealed class KmpDeclaration {
      * @property isAbstract  Whether the Kotlin declaration carries the `abstract` modifier.
      * @property functions   Public functions declared on this class, in source order.
      * @property docComment  KDoc comment on the class declaration, if present.
+     * @property hasZeroArgConstructor Whether the primary constructor takes no parameters —
+     *                       a JS-implemented anonymous subclass can only extend such a class.
+     * @property hasAbstractProperties Whether any public property is abstract — an anonymous
+     *                       subclass would have to override it, which generators cannot emit
+     *                       (properties are not read into the model).
      */
     data class KmpClass(
         val name: String,
@@ -99,6 +104,8 @@ sealed class KmpDeclaration {
         val functions: List<KmpFunction>,
         val typeParameters: List<String> = emptyList(),
         val docComment: String? = null,
+        val hasZeroArgConstructor: Boolean = true,
+        val hasAbstractProperties: Boolean = false,
     ) : KmpDeclaration()
 
     /**
@@ -111,12 +118,16 @@ sealed class KmpDeclaration {
      * @property packageName Fully qualified package.
      * @property functions   Abstract function signatures declared on this interface.
      * @property docComment  KDoc comment on the interface declaration, if present.
+     * @property hasAbstractProperties Whether any public property is abstract — a JS-implemented
+     *                       anonymous object would have to override it, which generators cannot
+     *                       emit (properties are not read into the model).
      */
     data class KmpInterface(
         val name: String,
         val packageName: String,
         val functions: List<KmpFunction>,
         val docComment: String? = null,
+        val hasAbstractProperties: Boolean = false,
     ) : KmpDeclaration()
 
     /**
@@ -345,6 +356,10 @@ data class KmpFunction(
     val returnType: KmpTypeRef,
     val docComment: String? = null,
     val isPropertyGetter: Boolean = false,
+    /** Whether the declaration is `open`/`abstract` (i.e. not `final`) — a JS-implemented
+     *  anonymous subclass can only override overridable members. Always true for interface
+     *  members; meaningless for top-level functions. */
+    val isOverridable: Boolean = true,
 ) {
     /**
      * Base name for a [FunctionKind.FLOW] function, used to derive event names and start/stop
@@ -520,6 +535,31 @@ enum class PrimitiveKind {
     SHORT,
     /** `kotlin.Char` */
     CHAR,
+}
+
+/**
+ * Whether a JS implementation of this interface/abstract class can be generated: the platform
+ * bridge creates an anonymous subtype overriding every member, which is only possible when the
+ * type has no abstract properties, and — for an abstract class — a zero-arg constructor and no
+ * `final` member functions. Used by all three generators to decide whether to emit the
+ * `create()` / `resolve<Fn>` reverse-bridge surface.
+ */
+fun KmpDeclaration.isJsImplementable(): Boolean = when (this) {
+    is KmpDeclaration.KmpInterface -> !hasAbstractProperties
+    is KmpDeclaration.KmpClass ->
+        isAbstract && hasZeroArgConstructor && !hasAbstractProperties && functions.all { it.isOverridable }
+    else -> false
+}
+
+/**
+ * Human-readable reason why [isJsImplementable] is false, for skip messages.
+ * Returns `null` when the declaration IS JS-implementable.
+ */
+fun KmpDeclaration.jsImplementabilityGap(): String? = when {
+    isJsImplementable() -> null
+    this is KmpDeclaration.KmpClass && !hasZeroArgConstructor -> "constructor has parameters"
+    this is KmpDeclaration.KmpClass && functions.any { !it.isOverridable } -> "has final member functions"
+    else -> "has abstract properties"
 }
 
 /**

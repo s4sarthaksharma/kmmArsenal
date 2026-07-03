@@ -207,13 +207,21 @@ object TsBridgeGenerator {
                     is KmpDeclaration.KmpClass     -> decl.functions
                     else -> emptyList()
                 }
+                // create()/resolve<Fn> only exist when the native side can build an anonymous
+                // subtype — mirrors AndroidGenerator/SwiftGenerator's isJsImplementable guard.
+                val jsImplementable = decl.isJsImplementable()
+                if (!jsImplementable) {
+                    onSkip("CREATE SKIPPED: $declName — cannot be JS-implemented (${decl.jsImplementabilityGap()}).")
+                }
                 appendLine()
                 appendLine("export class $declName {")
                 appendLine("  /** @internal */ readonly _handle: string")
                 appendLine("  private constructor(handle: string) { this._handle = handle }")
                 appendLine("  /** @internal */")
                 appendLine("  static _wrap(handle: string): $declName { return new $declName(handle) }")
-                appendLine("  static create(): $declName { return $declName._wrap(_$declName.create()) }")
+                if (jsImplementable) {
+                    appendLine("  static create(): $declName { return $declName._wrap(_$declName.create()) }")
+                }
                 appendLine()
                 appendLine("  destroy(): void { _$declName.destroy(this._handle) }")
                 for (fn in fns) {
@@ -221,7 +229,7 @@ object TsBridgeGenerator {
                     appendInstanceWrapperFunction(fn, declName, enumNames, dataNames, sealedNames, interfaceNames, abstractNames, onSkip)
                 }
                 // Task 5: reverse-bridge listener + resolve per SUSPEND method
-                for (fn in fns.filter { it.kind == FunctionKind.SUSPEND }) {
+                for (fn in (if (jsImplementable) fns.filter { it.kind == FunctionKind.SUSPEND } else emptyList())) {
                     val fnCap        = fn.name.replaceFirstChar { it.uppercase() }
                     val eventName    = "call$fnCap"
                     val listenerName = "add${eventName.replaceFirstChar { it.uppercase() }}Listener"
@@ -398,10 +406,22 @@ object TsBridgeGenerator {
                 appendLine("  ${fn.name}: ($params): Promise<$ret> => $callExpr,")
             }
             FunctionKind.FLOW -> {
+                if (fn.params.size > MAX_EXPO_FUNCTION_PARAMS) {
+                    onSkip("FUNCTION SKIPPED: $moduleName.${fn.name}() — too many params (${fn.params.size} > $MAX_EXPO_FUNCTION_PARAMS).")
+                    return
+                }
                 val base = fn.flowBaseName
                 val cap  = base.replaceFirstChar { it.uppercase() }
                 val valueType = fn.returnType.toTsType(enumNames, dataNames, sealedNames, interfaceNames, abstractNames, wrapperMode = true)
-                appendLine("  start$cap: (): void => $native.start$cap(),")
+                val params = fn.params.joinToString(", ") {
+                    "${it.name}: ${it.type.toTsType(enumNames, dataNames, sealedNames, interfaceNames, abstractNames, wrapperMode = true)}"
+                }
+                val args = fn.params.joinToString(", ") { p ->
+                    val pRef = p.type as? KmpTypeRef.ClassRef
+                    val isIface = pRef != null && (pRef.simpleName in interfaceNames || pRef.simpleName in abstractNames)
+                    when { !isIface -> p.name; pRef!!.nullable -> "${p.name}?._handle ?? null"; else -> "${p.name}._handle" }
+                }
+                appendLine("  start$cap: ($params): void => $native.start$cap($args),")
                 appendLine("  stop$cap: (): void => $native.stop$cap(),")
                 appendLine("  add${cap}Listener: (handler: (event: { value: $valueType }) => void) =>")
                 appendLine("    $native.addListener('on${cap}Update', handler),")
@@ -477,11 +497,23 @@ object TsBridgeGenerator {
                 }
             }
             FunctionKind.FLOW -> {
+                if (fn.params.size + 1 > MAX_EXPO_FUNCTION_PARAMS) {
+                    onSkip("FUNCTION SKIPPED: $moduleName.${fn.name}() — too many params (${fn.params.size} + handle > $MAX_EXPO_FUNCTION_PARAMS).")
+                    return
+                }
                 val base = fn.flowBaseName
                 val cap  = base.replaceFirstChar { it.uppercase() }
                 val valueType = fn.returnType.toTsType(enumNames, dataNames, sealedNames, interfaceNames, abstractNames, wrapperMode = true)
+                val params = fn.params.joinToString(", ") {
+                    "${it.name}: ${it.type.toTsType(enumNames, dataNames, sealedNames, interfaceNames, abstractNames, wrapperMode = true)}"
+                }
+                val args = (listOf("this._handle") + fn.params.map { p ->
+                    val pRef = p.type as? KmpTypeRef.ClassRef
+                    val isIface = pRef != null && (pRef.simpleName in interfaceNames || pRef.simpleName in abstractNames)
+                    when { !isIface -> p.name; pRef!!.nullable -> "${p.name}?._handle ?? null"; else -> "${p.name}._handle" }
+                }).joinToString(", ")
                 appendLine()
-                appendLine("  start$cap(): void { $native.start$cap(this._handle) }")
+                appendLine("  start$cap($params): void { $native.start$cap($args) }")
                 appendLine("  stop$cap(): void { $native.stop$cap(this._handle) }")
                 appendLine("  add${cap}Listener(handler: (event: { value: $valueType }) => void) {")
                 appendLine("    return $native.addListener('on${cap}Update', (e: any) => {")

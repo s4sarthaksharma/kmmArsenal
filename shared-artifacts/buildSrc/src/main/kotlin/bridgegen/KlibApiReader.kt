@@ -235,6 +235,7 @@ object KlibApiReader {
                 name        = name,
                 packageName = pkg,
                 functions   = readFunctions(cls, nr, tt),
+                hasAbstractProperties = hasAbstractProperties(cls),
             )
 
             kind == ProtoBuf.Class.Kind.OBJECT ||
@@ -271,6 +272,10 @@ object KlibApiReader {
                 isAbstract     = modality == ProtoBuf.Modality.ABSTRACT,
                 functions      = readFunctions(cls, nr, tt),
                 typeParameters = cls.typeParameterList.map { nr.getString(it.name) },
+                hasZeroArgConstructor = cls.constructorList
+                    .firstOrNull { !Flags.IS_SECONDARY.get(it.flags) }
+                    ?.valueParameterList?.isEmpty() ?: true,
+                hasAbstractProperties = hasAbstractProperties(cls),
             )
         }
     }
@@ -296,6 +301,13 @@ object KlibApiReader {
             )
         }
     }
+
+    /** Whether [cls] declares any public `abstract` property (blocks JS-implementation). */
+    private fun hasAbstractProperties(cls: ProtoBuf.Class): Boolean =
+        cls.propertyList.any {
+            Flags.VISIBILITY.get(it.flags) == ProtoBuf.Visibility.PUBLIC &&
+                Flags.MODALITY.get(it.flags) == ProtoBuf.Modality.ABSTRACT
+        }
 
     // ── Function reading ──────────────────────────────────────────────────────
 
@@ -353,7 +365,13 @@ object KlibApiReader {
             )
         }
 
-        return KmpFunction(name = name, kind = kind, params = params, returnType = effectiveReturn)
+        return KmpFunction(
+            name          = name,
+            kind          = kind,
+            params        = params,
+            returnType    = effectiveReturn,
+            isOverridable = Flags.MODALITY.get(func.flags) != ProtoBuf.Modality.FINAL,
+        )
     }
 
     /**

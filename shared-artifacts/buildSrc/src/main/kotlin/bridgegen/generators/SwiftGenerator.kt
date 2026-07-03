@@ -496,15 +496,21 @@ object SwiftGenerator {
         val flows      = bridgeable.filter { it.kind == FunctionKind.FLOW }
         val hasFlows   = flows.isNotEmpty()
 
+        // create()/resolve<Fn> only exist when an anonymous subtype can be compiled —
+        // mirrors AndroidGenerator/TsBridgeGenerator's isJsImplementable guard.
+        val jsImplementable = decl.isJsImplementable()
+
         // All events: flow updates + JS call events (for reverse bridge)
         val flowEvents = flows.map { "on${it.flowBaseName.cap()}Update" }
-        val callEvents = suspendFns.map { "call${it.name.cap()}" }
+        val callEvents = if (jsImplementable) suspendFns.map { "call${it.name.cap()}" } else emptyList()
         val allEvents  = flowEvents + callEvents
 
         // ── JS impl class ─────────────────────────────────────────────────────
         val superInit = if (isAbstract) "\n    super.init()" else ""
 
-        if (isAbstract) {
+        if (!jsImplementable) {
+            appendLine("// create() not generated for $name — cannot be JS-implemented (${decl.jsImplementabilityGap()}).")
+        } else if (isAbstract) {
             // Abstract class: subclass and override SKIE's __ prefixed methods
             appendLine("fileprivate class ${name}JsImpl: $name {")
             appendLine("  private let instanceId: String")
@@ -628,7 +634,7 @@ object SwiftGenerator {
         if (hasFlows) {
             appendLine("  private static var _flowTasks: [String: [FlowKey: Task<Void, Never>]] = [:]")
         }
-        if (hasSuspend) {
+        if (hasSuspend && jsImplementable) {
             appendLine("  static var _pendingCalls: [String: (Any?, Error?) -> Void] = [:]")
         }
         appendLine()
@@ -656,22 +662,24 @@ object SwiftGenerator {
             appendLine("    }")
         }
 
-        // create() — instantiates JS impl class
-        appendLine()
-        appendLine("""    Function("create") {""")
-        appendLine("      let instanceId = UUID().uuidString")
-        appendLine("      let impl = ${name}JsImpl(instanceId: instanceId) { [weak self] name, body in")
-        appendLine("        self?.sendEvent(name, body)")
-        appendLine("      }")
-        if (isAbstract) {
-            appendLine("      Self._instances[instanceId] = impl")
-        } else {
-            // class_addProtocol was called at class load; now the ObjC runtime accepts the cast
-            appendLine("      _ = ${name}JsImpl._register")
-            appendLine("      Self._instances[instanceId] = impl as! any $name")
+        // create() — instantiates JS impl class (only when JS-implementable)
+        if (jsImplementable) {
+            appendLine()
+            appendLine("""    Function("create") {""")
+            appendLine("      let instanceId = UUID().uuidString")
+            appendLine("      let impl = ${name}JsImpl(instanceId: instanceId) { [weak self] name, body in")
+            appendLine("        self?.sendEvent(name, body)")
+            appendLine("      }")
+            if (isAbstract) {
+                appendLine("      Self._instances[instanceId] = impl")
+            } else {
+                // class_addProtocol was called at class load; now the ObjC runtime accepts the cast
+                appendLine("      _ = ${name}JsImpl._register")
+                appendLine("      Self._instances[instanceId] = impl as! any $name")
+            }
+            appendLine("      return instanceId")
+            appendLine("    }")
         }
-        appendLine("      return instanceId")
-        appendLine("    }")
 
         appendLine()
         appendLine("""    Function("destroy") { (instanceId: String) in""")
@@ -693,7 +701,7 @@ object SwiftGenerator {
         }
 
         // resolve functions for each SUSPEND method (JS → Kotlin callback)
-        for (fn in suspendFns) {
+        for (fn in (if (jsImplementable) suspendFns else emptyList())) {
             val resolveName   = "resolve${fn.name.cap()}"
             val resolveType   = fn.returnType.toSwiftResolveParamType(enumNames, dataNames, sealedNames)
             val resolveConv   = fn.returnType.toSwiftResolveConversion("result", enumNames, dataNames, sealedNames)
@@ -875,14 +883,26 @@ object SwiftGenerator {
         val Cap       = base.cap()
         val eventName = "on${Cap}Update"
         val valueExpr = fn.returnType.toSwiftFlowValueExpr(enumNames, dataNames, sealedNames)
+        val ownParams = fn.params.joinToString(", ") { "${it.name}: ${it.type.toSwiftBridgeType(enumNames, dataNames, sealedNames)}" }
+        val paramList = if (ownParams.isEmpty()) "instanceId: String" else "instanceId: String, $ownParams"
+        // Param conversions may throw (enum decode) — hoist them into locals inside the throwing
+        // closure so the Task body itself stays non-throwing.
+        val argDecls = fn.params.map { p ->
+            val (prefix, arg) = p.type.toSwiftCallArgWithPrefix(p.name, enumNames, dataNames, sealedNames)
+            if (prefix.isEmpty() && arg == p.name) null to "${p.name}: ${p.name}"
+            else "      let __${p.name} = ${prefix}$arg" to "${p.name}: __${p.name}"
+        }
+        val callArgs = argDecls.joinToString(", ") { it.second }
+        val throwsClause = if (fn.needsThrows(enumNames, dataNames, sealedNames)) " throws" else ""
 
-        appendLine("""    Function("start$Cap") { (instanceId: String) in""")
+        appendLine("""    Function("start$Cap") { ($paramList)$throwsClause in""")
+        argDecls.mapNotNull { it.first }.forEach { appendLine(it) }
         appendLine("      Self._flowTasks[instanceId]?[.$base]?.cancel()")
         appendLine("      if Self._flowTasks[instanceId] == nil { Self._flowTasks[instanceId] = [:] }")
         appendLine("      guard let inst = Self._instances[instanceId] else { return }")
         appendLine("      Self._flowTasks[instanceId]![.$base] = Task { [weak self] in")
         appendLine("        guard let self else { return }")
-        appendLine("        for await value in inst.${fn.name}() {")
+        appendLine("        for await value in inst.${fn.name}($callArgs) {")
         appendLine("""          self.sendEvent("$eventName", ["instanceId": instanceId, "value": $valueExpr])""")
         appendLine("        }")
         appendLine("      }")
@@ -1010,15 +1030,27 @@ object SwiftGenerator {
         val Cap       = base.cap()
         val eventName = "on${Cap}Update"
         val valueExpr = fn.returnType.toSwiftFlowValueExpr(enumNames, dataNames, sealedNames)
+        val ownParams = fn.params.joinToString(", ") { "${it.name}: ${it.type.toSwiftBridgeType(enumNames, dataNames, sealedNames)}" }
+        // Param conversions may throw (enum decode) — hoist them into locals inside the throwing
+        // closure so the Task body itself stays non-throwing.
+        val argDecls = fn.params.map { p ->
+            val (prefix, arg) = p.type.toSwiftCallArgWithPrefix(p.name, enumNames, dataNames, sealedNames)
+            if (prefix.isEmpty() && arg == p.name) null to "${p.name}: ${p.name}"
+            else "      let __${p.name} = ${prefix}$arg" to "${p.name}: __${p.name}"
+        }
+        val callArgs = argDecls.joinToString(", ") { it.second }
+        val throwsClause = if (fn.needsThrows(enumNames, dataNames, sealedNames)) " throws" else ""
         append(formatComment(fn.docComment))
 
         if (isInstanceBased) {
-            appendLine("""    Function("start$Cap") { (instanceId: String) in""")
+            val paramList = if (ownParams.isEmpty()) "instanceId: String" else "instanceId: String, $ownParams"
+            appendLine("""    Function("start$Cap") { ($paramList)$throwsClause in""")
+            argDecls.mapNotNull { it.first }.forEach { appendLine(it) }
             appendLine("      self.flowTasks[instanceId]?[.$base]?.cancel()")
             appendLine("      if self.flowTasks[instanceId] == nil { self.flowTasks[instanceId] = [:] }")
             appendLine("      self.flowTasks[instanceId]![.$base] = Task { [weak self] in")
             appendLine("        guard let self, let inst = self.instances[instanceId] else { return }")
-            appendLine("        for await value in inst.${fn.name}() {")
+            appendLine("        for await value in inst.${fn.name}($callArgs) {")
             appendLine("""          self.sendEvent("$eventName", ["instanceId": instanceId, "value": $valueExpr])""")
             appendLine("        }")
             appendLine("      }")
@@ -1031,11 +1063,16 @@ object SwiftGenerator {
         } else {
             // For file scope, `instance` is the facade type name — class method, no `self.`.
             val callPrefix = if (isFileScope) instance else "self.$instance"
-            appendLine("""    Function("start$Cap") {""")
+            if (ownParams.isEmpty()) {
+                appendLine("""    Function("start$Cap") {""")
+            } else {
+                appendLine("""    Function("start$Cap") { ($ownParams)$throwsClause in""")
+            }
+            argDecls.mapNotNull { it.first }.forEach { appendLine(it) }
             appendLine("      self.flowTasks[.$base]?.cancel()")
             appendLine("      self.flowTasks[.$base] = Task { [weak self] in")
             appendLine("        guard let self else { return }")
-            appendLine("        for await value in $callPrefix.${fn.name}() {")
+            appendLine("        for await value in $callPrefix.${fn.name}($callArgs) {")
             appendLine("""          self.sendEvent("$eventName", ["value": $valueExpr])""")
             appendLine("        }")
             appendLine("      }")

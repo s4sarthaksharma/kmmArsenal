@@ -326,7 +326,10 @@ object AndroidGenerator {
         val isFileScope = decl is KmpDeclaration.KmpFileScope
         val isInstanceBased = !isObject && !isFileScope
 
+        // Flows whose effective param count exceeds the Expo limit are skipped by flowFunctions;
+        // exclude them from event/FlowKey bookkeeping so no unused declarations are emitted.
         val flows      = functions.filter { it.kind == FunctionKind.FLOW }
+            .filter { it.params.size + (if (isInstanceBased) 1 else 0) <= MAX_EXPO_FUNCTION_PARAMS }
         val hasSuspend = functions.any { it.kind == FunctionKind.SUSPEND }
         val hasFlows   = flows.isNotEmpty()
         val eventNames = flows.map { "on${it.flowBaseName.cap()}Update" }
@@ -438,7 +441,7 @@ object AndroidGenerator {
             when (fn.kind) {
                 FunctionKind.SYNC    -> sb.append(syncFunction(fn, callTarget, enumNames, dataClassNames, sealedNames, onSkip, isInstanceBased = isInstanceBased, useHolder = useHolder, interfaceNames = interfaceNames, abstractNames = abstractNames))
                 FunctionKind.SUSPEND -> sb.append(suspendFunction(fn, callTarget, enumNames, dataClassNames, sealedNames, onSkip, isInstanceBased = isInstanceBased, useHolder = useHolder, interfaceNames = interfaceNames, abstractNames = abstractNames))
-                FunctionKind.FLOW    -> sb.append(flowFunctions(fn, callTarget, enumNames, dataClassNames, sealedNames, useHolder = useHolder))
+                FunctionKind.FLOW    -> sb.append(flowFunctions(fn, callTarget, enumNames, dataClassNames, sealedNames, useHolder = useHolder, interfaceNames = interfaceNames, abstractNames = abstractNames, onSkip = onSkip))
             }
         }
 
@@ -485,11 +488,16 @@ object AndroidGenerator {
         val functions = decl.declFunctions()
         val registryName = "${name}Registry"
 
+        // Flows over the Expo param limit are skipped by flowFunctions (interface flows always
+        // carry the synthetic instanceId); keep event/FlowKey bookkeeping in sync.
         val flows = functions.filter { it.kind == FunctionKind.FLOW }
+            .filter { it.params.size + 1 <= MAX_EXPO_FUNCTION_PARAMS }
         val hasSuspend = functions.any { it.kind == FunctionKind.SUSPEND }
         val hasFlows = flows.isNotEmpty()
+        // The call<Fn> reverse-bridge events only exist when a JS implementation can be created.
+        val jsImplementable = decl.isJsImplementable()
         val eventNames = flows.map { "on${it.flowBaseName.cap()}Update" } +
-            functions.filter { it.kind == FunctionKind.SUSPEND }.map { "call${it.name.cap()}" }
+            (if (jsImplementable) functions.filter { it.kind == FunctionKind.SUSPEND }.map { "call${it.name.cap()}" } else emptyList())
         val usedEnums = enumNames.filter { eName -> functions.any { fn -> fn.referencesEnum(eName) } }
         val interfaceNames = module.declarations.filterIsInstance<KmpDeclaration.KmpInterface>().map { it.name }.toSet()
         val abstractNames  = module.declarations.filterIsInstance<KmpDeclaration.KmpClass>().filter { it.isAbstract }.map { it.name }.toSet()
@@ -564,11 +572,22 @@ object AndroidGenerator {
             when (fn.kind) {
                 FunctionKind.SYNC    -> sb.append(syncFunction(fn, "", enumNames, dataClassNames, sealedNames, onSkip, isInstanceBased = true, useHolder = false, registryName = registryName, interfaceNames = interfaceNames, abstractNames = abstractNames))
                 FunctionKind.SUSPEND -> sb.append(suspendFunction(fn, "", enumNames, dataClassNames, sealedNames, onSkip, isInstanceBased = true, useHolder = false, registryName = registryName, interfaceNames = interfaceNames, abstractNames = abstractNames))
-                FunctionKind.FLOW    -> sb.append(flowFunctions(fn, "", enumNames, dataClassNames, sealedNames, useHolder = false, registryName = registryName))
+                FunctionKind.FLOW    -> sb.append(flowFunctions(fn, "", enumNames, dataClassNames, sealedNames, useHolder = false, registryName = registryName, interfaceNames = interfaceNames, abstractNames = abstractNames, onSkip = onSkip))
             }
         }
 
         // ── Task 5: JS-implemented interface ─────────────────────────────────────
+        // Only emitted when the anonymous subtype can actually be compiled — a ctor with
+        // parameters, a final member function, or an abstract property makes that impossible.
+        if (!jsImplementable) {
+            val msg = "CREATE SKIPPED: $name — cannot be JS-implemented (${decl.jsImplementabilityGap()})."
+            onSkip(msg)
+            sb.appendLine()
+            sb.appendLine("    // $msg")
+            sb.appendLine("  }")
+            sb.append("}")
+            return imports to sb.toString()
+        }
         val isAbstractClass = decl is KmpDeclaration.KmpClass && (decl as KmpDeclaration.KmpClass).isAbstract
         val implBase = if (isAbstractClass) "$name()" else name
         val suspendFns = functions.filter { it.kind == FunctionKind.SUSPEND }
@@ -768,6 +787,13 @@ object AndroidGenerator {
      * event (converting enums/data classes/sealed classes to their wire representation where
      * applicable), and tracks the job by flow key so `stop<Name>` (or `destroy`) can cancel it.
      * Instance-based declarations key jobs per instance via [useHolder] / [registryName].
+     *
+     * Function parameters are threaded through `start<Name>` and passed to the underlying flow
+     * call; `stop<Name>` never takes them (it cancels by flow key regardless of start args).
+     *
+     * @return the generated block, or a `// BRIDGE SKIPPED` comment line if the effective
+     *         parameter count (including the synthetic `instanceId`) exceeds
+     *         [MAX_EXPO_FUNCTION_PARAMS].
      */
     private fun flowFunctions(
         fn: KmpFunction,
@@ -777,7 +803,17 @@ object AndroidGenerator {
         sealedNames: Set<String> = emptySet(),
         useHolder: Boolean = false,
         registryName: String? = null,
+        interfaceNames: Set<String> = emptySet(),
+        abstractNames: Set<String> = emptySet(),
+        onSkip: (String) -> Unit = {},
     ): String {
+        val isInstanceBased = useHolder || registryName != null
+        val effectiveParamCount = fn.params.size + if (isInstanceBased) 1 else 0
+        if (effectiveParamCount > MAX_EXPO_FUNCTION_PARAMS) {
+            val msg = "BRIDGE SKIPPED: ${fn.name}(${fn.params.size} params) — Expo Function DSL supports max $MAX_EXPO_FUNCTION_PARAMS parameters."
+            onSkip(msg)
+            return "    // $msg\n"
+        }
         val sb        = StringBuilder()
         val base      = fn.flowBaseName
         val Cap       = base.cap()
@@ -791,14 +827,16 @@ object AndroidGenerator {
             retType is KmpTypeRef.ClassRef  && retType.simpleName in sealedNames               -> "value.toRecord()"
             else -> "value"
         }
+        val ownParams = fn.params.joinToString(", ") { "${it.name}: ${it.type.toBridgeParamType(enumNames, interfaceNames, abstractNames)}" }
+        val callArgs  = fn.params.joinToString(", ") { it.type.toCallArg(it.name, enumNames, interfaceNames, abstractNames) }
 
-        sb.append(formatComment(fn.docComment))
         if (registryName != null) {
-            sb.appendLine("""    Function("start$Cap") { instanceId: String ->""")
+            val paramList = if (ownParams.isEmpty()) "instanceId: String" else "instanceId: String, $ownParams"
+            sb.appendLine("""    Function("start$Cap") { $paramList ->""")
             sb.appendLine("      val holder = $registryName.get(instanceId)")
             sb.appendLine("      holder.flowJobs[$enumKey]?.cancel()")
             sb.appendLine("      holder.flowJobs[$enumKey] = holder.scope.launch {")
-            sb.appendLine("        holder.instance.${fn.name}().collect { value ->")
+            sb.appendLine("        holder.instance.${fn.name}($callArgs).collect { value ->")
             sb.appendLine("""          sendEvent("$eventName", mapOf("instanceId" to instanceId, "value" to $emit))""")
             sb.appendLine("        }")
             sb.appendLine("      }")
@@ -810,11 +848,12 @@ object AndroidGenerator {
             sb.appendLine("      holder.flowJobs.remove($enumKey)")
             sb.appendLine("    }")
         } else if (useHolder) {
-            sb.appendLine("""    Function("start$Cap") { instanceId: String ->""")
+            val paramList = if (ownParams.isEmpty()) "instanceId: String" else "instanceId: String, $ownParams"
+            sb.appendLine("""    Function("start$Cap") { $paramList ->""")
             sb.appendLine("      val holder = instances[instanceId] ?: error(\"Instance not found: \$instanceId\")")
             sb.appendLine("      holder.flowJobs[$enumKey]?.cancel()")
             sb.appendLine("      holder.flowJobs[$enumKey] = holder.scope.launch {")
-            sb.appendLine("        holder.instance.${fn.name}().collect { value ->")
+            sb.appendLine("        holder.instance.${fn.name}($callArgs).collect { value ->")
             sb.appendLine("""          sendEvent("$eventName", mapOf("instanceId" to instanceId, "value" to $emit))""")
             sb.appendLine("        }")
             sb.appendLine("      }")
@@ -826,10 +865,14 @@ object AndroidGenerator {
             sb.appendLine("      holder.flowJobs.remove($enumKey)")
             sb.appendLine("    }")
         } else {
-            sb.appendLine("""    Function("start$Cap") {""")
+            if (ownParams.isEmpty()) {
+                sb.appendLine("""    Function("start$Cap") {""")
+            } else {
+                sb.appendLine("""    Function("start$Cap") { $ownParams ->""")
+            }
             sb.appendLine("      flowJobs[$enumKey]?.cancel()")
             sb.appendLine("      flowJobs[$enumKey] = scope.launch {")
-            sb.appendLine("        $callTarget.${fn.name}().collect { value ->")
+            sb.appendLine("        $callTarget.${fn.name}($callArgs).collect { value ->")
             sb.appendLine("""          sendEvent("$eventName", mapOf("value" to $emit))""")
             sb.appendLine("        }")
             sb.appendLine("      }")
