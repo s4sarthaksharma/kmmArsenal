@@ -346,7 +346,7 @@ object AndroidGenerator {
         val imports = mutableSetOf<String>()
         if (!isFileScope) imports.add("$kmpPackageName.$name")
         for (eName in usedEnums) imports.add("$kmpPackageName.$eName")
-        if (hasSuspend) imports.add("expo.modules.kotlin.Promise")
+        if (hasSuspend) { imports.add("expo.modules.kotlin.Promise"); imports.add("java.util.concurrent.atomic.AtomicBoolean") }
         imports.add("expo.modules.kotlin.modules.Module")
         imports.add("expo.modules.kotlin.modules.ModuleDefinition")
         if (hasSuspend || hasFlows) {
@@ -395,6 +395,10 @@ object AndroidGenerator {
             }
         }
 
+        if (hasSuspend) {
+            sb.appendLine()
+            sb.appendLine(settledLaunchHelper())
+        }
         sb.appendLine()
         sb.appendLine("  override fun definition() = ModuleDefinition {")
         sb.appendLine("""    Name("$name")""")
@@ -507,7 +511,7 @@ object AndroidGenerator {
         for (eName in usedEnums) imports.add("$kmpPackageName.$eName")
         imports.add("expo.modules.kotlin.modules.Module")
         imports.add("expo.modules.kotlin.modules.ModuleDefinition")
-        if (hasSuspend) imports.add("expo.modules.kotlin.Promise")
+        if (hasSuspend) { imports.add("expo.modules.kotlin.Promise"); imports.add("java.util.concurrent.atomic.AtomicBoolean") }
         imports.add("kotlinx.coroutines.CompletableDeferred")
         imports.add("kotlinx.coroutines.CoroutineScope")
         imports.add("kotlinx.coroutines.Dispatchers")
@@ -553,6 +557,10 @@ object AndroidGenerator {
         sb.appendLine()
 
         sb.appendLine("class ${name}Module : Module() {")
+        if (hasSuspend) {
+            sb.appendLine()
+            sb.appendLine(settledLaunchHelper())
+        }
         sb.appendLine()
         sb.appendLine("  override fun definition() = ModuleDefinition {")
         sb.appendLine("""    Name("$name")""")
@@ -613,12 +621,18 @@ object AndroidGenerator {
                     }
                     val (_, castExpr) = fn.returnType.resolveWireContract(enumNames, dataClassNames, sealedNames)
                     sb.appendLine("        override suspend fun ${fn.name}($pList): $retT {")
+                    sb.appendLine("          val holder = ${registryName}.get(instanceId)")
                     sb.appendLine("          val callId = UUID.randomUUID().toString()")
                     sb.appendLine("          val deferred = CompletableDeferred<Any?>()")
-                    sb.appendLine("          ${registryName}.get(instanceId).pendingCalls[callId] = deferred")
-                    sb.appendLine("""          emitEvent("$eventName", mapOf($paramMapEntries))""")
-                    if (isUnit) sb.appendLine("          deferred.await()")
-                    else        sb.appendLine("          return $castExpr")
+                    sb.appendLine("          holder.pendingCalls[callId] = deferred")
+                    sb.appendLine("          try {")
+                    sb.appendLine("""            emitEvent("$eventName", mapOf($paramMapEntries))""")
+                    if (isUnit) sb.appendLine("            deferred.await()")
+                    else        sb.appendLine("            return $castExpr")
+                    sb.appendLine("          } finally {")
+                    sb.appendLine("            // Abandoned/cancelled awaits must not leak their pendingCalls entry.")
+                    sb.appendLine("            holder.pendingCalls.remove(callId)")
+                    sb.appendLine("          }")
                     sb.appendLine("        }")
                 }
                 FunctionKind.FLOW -> {
@@ -717,10 +731,12 @@ object AndroidGenerator {
      * Emits one Expo `AsyncFunction("name") { ... }` block for a [FunctionKind.SUSPEND] KMP
      * function.
      *
-     * Launches the suspend call on the owning `CoroutineScope` (module-level, per-instance
-     * holder, or interface [registryName] holder) and resolves/rejects the trailing
-     * `promise: Promise` parameter with the result or a caught exception, tagged with an
-     * `<FUNCTION_NAME>_ERROR` code.
+     * Delegates to the generated `launchSettled` helper (see [settledLaunchHelper]), which runs
+     * the suspend call on the owning `CoroutineScope` (module-level, per-instance holder, or
+     * interface [registryName] holder) and guarantees the trailing `promise: Promise` parameter
+     * settles exactly once — resolved with the result, or rejected with an
+     * `<FUNCTION_NAME>_ERROR` code on exception or scope cancellation (e.g. `destroy()` during
+     * an in-flight call).
      *
      * @return the generated `AsyncFunction(...)` block, or a `// BRIDGE SKIPPED` comment line if
      *         the effective parameter count exceeds [MAX_EXPO_FUNCTION_PARAMS].
@@ -752,30 +768,44 @@ object AndroidGenerator {
         val paramList = allParams.joinToString(", ")
         val callArgs  = fn.params.joinToString(", ") { it.type.toCallArg(it.name, enumNames, interfaceNames, abstractNames) }
 
-        sb.append(formatComment(fn.docComment))
         sb.appendLine("""    AsyncFunction("${fn.name}") { $paramList ->""")
         if (registryName != null) {
             sb.appendLine("      val holder = $registryName.get(instanceId)")
-            sb.appendLine("      holder.scope.launch {")
-            sb.appendLine("        try {")
-            sb.appendLine("          promise.resolve(holder.instance.${fn.name}($callArgs)$ret)")
+            sb.appendLine("""      launchSettled(holder.scope, promise, "$errorTag") { holder.instance.${fn.name}($callArgs)$ret }""")
         } else if (useHolder) {
             sb.appendLine("      val holder = instances[instanceId] ?: error(\"Instance not found: \$instanceId\")")
-            sb.appendLine("      holder.scope.launch {")
-            sb.appendLine("        try {")
-            sb.appendLine("          promise.resolve(holder.instance.${fn.name}($callArgs)$ret)")
+            sb.appendLine("""      launchSettled(holder.scope, promise, "$errorTag") { holder.instance.${fn.name}($callArgs)$ret }""")
         } else {
-            sb.appendLine("      scope.launch {")
-            sb.appendLine("        try {")
             val instanceExpr = if (isInstanceBased) "(instances[instanceId] ?: error(\"Instance not found: \$instanceId\"))" else callTarget
-            sb.appendLine("          promise.resolve($instanceExpr.${fn.name}($callArgs)$ret)")
+            sb.appendLine("""      launchSettled(scope, promise, "$errorTag") { $instanceExpr.${fn.name}($callArgs)$ret }""")
         }
-        sb.appendLine("        } catch (e: Exception) {")
-        sb.appendLine("""          promise.reject("$errorTag", e.message, e)""")
-        sb.appendLine("        }")
-        sb.appendLine("      }")
         sb.appendLine("    }")
         return sb.toString()
+    }
+
+    /**
+     * The generated per-module `launchSettled` helper: launches [block] on the given scope and
+     * guarantees the promise settles exactly once — including when the scope is cancelled
+     * before the coroutine runs (a plain `scope.launch` would silently drop the block and leave
+     * the JS promise pending forever) or while it is suspended.
+     */
+    private fun settledLaunchHelper(): String = buildString {
+        appendLine("  private fun launchSettled(scope: CoroutineScope, promise: Promise, errorTag: String, block: suspend () -> Any?) {")
+        appendLine("    val settled = AtomicBoolean(false)")
+        appendLine("    val job = scope.launch {")
+        appendLine("      try {")
+        appendLine("        val result = block()")
+        appendLine("        if (settled.compareAndSet(false, true)) promise.resolve(result)")
+        appendLine("      } catch (e: Exception) {")
+        appendLine("        if (settled.compareAndSet(false, true)) promise.reject(errorTag, e.message, e)")
+        appendLine("      }")
+        appendLine("    }")
+        appendLine("    job.invokeOnCompletion { cause ->")
+        appendLine("      if (cause != null && settled.compareAndSet(false, true)) {")
+        appendLine("        promise.reject(errorTag, \"Cancelled: \${cause.message}\", Exception(cause))")
+        appendLine("      }")
+        appendLine("    }")
+        append("  }")
     }
 
     /**
