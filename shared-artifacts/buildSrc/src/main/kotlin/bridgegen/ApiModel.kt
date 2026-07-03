@@ -2,7 +2,7 @@
  * Data model for the resolved public API surface of a KMP module.
  *
  * A `KlibApiReader` reads the compiled `.klib` artifact and produces a [KmpModule] value.
- * The three platform generators (AndroidGenerator, SwiftGenerator, TypeScriptGenerator)
+ * The three platform generators (AndroidGenerator, SwiftGenerator, TsBridgeGenerator)
  * then consume that [KmpModule] to emit native bridge files for each platform.
  *
  * Hierarchy:
@@ -19,7 +19,8 @@
  *      │         ├── DataVariant   — data class subtype (has fields)
  *      │         ├── ObjectVariant — singleton subtype (no fields, e.g. Loading, Empty)
  *      │         └── ClassVariant  — regular class subtype (has constructor fields)
- *      └── KmpEnum           — enumerated constant set
+ *      ├── KmpEnum           — enumerated constant set
+ *      └── KmpFileScope      — top-level functions/properties of one source file
  * ```
  *
  * Every function's parameter and return types are represented as [KmpTypeRef], which captures
@@ -81,16 +82,16 @@ sealed class KmpDeclaration {
     /**
      * A concrete or abstract Kotlin class.
      *
-     * When [isAbstract] is `true` the class cannot be instantiated directly; generators
-     * typically emit it as an abstract base type (TypeScript abstract class, Swift open class).
-     * When `false` the generators produce a full bridge module that creates and delegates to
-     * an instance of this class.
+     * When [isAbstract] is `true` the class cannot be instantiated directly; generators route
+     * it to interface-style bridging (an id-keyed registry module plus an opaque-handle wrapper
+     * class in TypeScript). When `false` the generators produce a full bridge module that
+     * creates and delegates to an instance of this class.
      *
      * @property name        Simple class name (e.g. `"AuthRepository"`).
      * @property packageName Fully qualified package (e.g. `"com.myapp.shared.auth"`).
      * @property isAbstract  Whether the Kotlin declaration carries the `abstract` modifier.
      * @property functions   Public functions declared on this class, in source order.
-     * @property docComment  KDoc comment on the class declaration, if present.
+     * @property docComment  Reserved for KDoc; currently never populated (klib metadata carries no comments).
      * @property hasZeroArgConstructor Whether the primary constructor takes no parameters —
      *                       a JS-implemented anonymous subclass can only extend such a class.
      * @property hasAbstractProperties Whether any public property is abstract — an anonymous
@@ -111,13 +112,14 @@ sealed class KmpDeclaration {
     /**
      * A Kotlin `interface` declaration.
      *
-     * All functions on an interface are implicitly abstract. Generators typically emit this
-     * as a TypeScript `interface`, a Swift `protocol`, or leave it as a Kotlin interface on Android.
+     * All functions on an interface are implicitly abstract. Generators bridge it via an
+     * id-keyed registry module (opaque-handle wrapper class in TypeScript); interfaces with no
+     * functions become plain type-only TS interfaces.
      *
      * @property name        Simple interface name (e.g. `"UserRepository"`).
      * @property packageName Fully qualified package.
      * @property functions   Abstract function signatures declared on this interface.
-     * @property docComment  KDoc comment on the interface declaration, if present.
+     * @property docComment  Reserved for KDoc; currently never populated (klib metadata carries no comments).
      * @property hasAbstractProperties Whether any public property is abstract — a JS-implemented
      *                       anonymous object would have to override it, which generators cannot
      *                       emit (properties are not read into the model).
@@ -139,7 +141,7 @@ sealed class KmpDeclaration {
      * @property name        Simple object name (e.g. `"AnalyticsApi"`).
      * @property packageName Fully qualified package.
      * @property functions   Public functions on this object, in source order.
-     * @property docComment  KDoc comment on the object declaration, if present.
+     * @property docComment  Reserved for KDoc; currently never populated (klib metadata carries no comments).
      */
     data class KmpObject(
         val name: String,
@@ -159,7 +161,7 @@ sealed class KmpDeclaration {
      * @property packageName Fully qualified package.
      * @property fields      Constructor parameters in declaration order (the primary constructor).
      * @property functions   Additional public member functions beyond the data class defaults.
-     * @property docComment  KDoc comment on the class declaration, if present.
+     * @property docComment  Reserved for KDoc; currently never populated (klib metadata carries no comments).
      */
     data class KmpDataClass(
         val name: String,
@@ -174,14 +176,14 @@ sealed class KmpDeclaration {
      *
      * All direct subclasses are enumerated in [variants]. Sealed types cross the JS bridge as a
      * tagged record: `{ type: "VariantName", ...fields }`. Generators emit discriminated-union
-     * types (TypeScript), Swift enums with associated values, and Kotlin sealed classes (no-op
-     * on Android since the type is already native).
+     * types (TypeScript) and a flat all-nullable Record codec with a `type` discriminator on
+     * the native side (Android Kotlin / Swift).
      *
      * @property name        Simple sealed class name (e.g. `"AuthState"`, `"NetworkResult"`).
      * @property packageName Fully qualified package.
      * @property variants    All direct subtypes, in source order.
      * @property functions   Shared functions declared on the sealed parent (uncommon but valid).
-     * @property docComment  KDoc comment on the sealed class declaration, if present.
+     * @property docComment  Reserved for KDoc; currently never populated (klib metadata carries no comments).
      */
     data class KmpSealedClass(
         val name: String,
@@ -195,13 +197,13 @@ sealed class KmpDeclaration {
      * A Kotlin `enum class`.
      *
      * Enum values travel as their **case-name string** over the JS↔native bridge (e.g.
-     * `Direction.NORTH` crosses as `"NORTH"`). Generators emit typed enum conversions on each
-     * platform so callers always see the typed enum value, not a raw string.
+     * `Direction.NORTH` crosses as `"NORTH"`). Function params/returns are re-typed as the TS
+     * string-backed enum in wrapper mode; record fields carry the raw case-name string.
      *
      * @property name    Simple enum class name (e.g. `"Direction"`, `"Status"`).
      * @property packageName Fully qualified package.
      * @property entries Enum case names in declaration order (e.g. `["NORTH", "SOUTH", "EAST", "WEST"]`).
-     * @property docComment KDoc comment on the enum class declaration, if present.
+     * @property docComment Reserved for KDoc; currently never populated (klib metadata carries no comments).
      */
     data class KmpEnum(
         val name: String,
@@ -361,8 +363,8 @@ data class KmpParam(
  * @property returnType The fully resolved return type. For [FunctionKind.FLOW] functions this is
  *                      the *element* type — the `Flow<…>` wrapper is stripped during normalization
  *                      so generators work with the concrete element type directly.
- * @property docComment KDoc or line comment immediately preceding the function declaration,
- *                      if present. Generators reformat and re-emit it above the generated function.
+ * @property docComment Reserved for the declaration's KDoc. Currently always `null` —
+ *                      klib metadata carries no comments and the reader does not scan source.
  */
 data class KmpFunction(
     val name: String,
@@ -381,7 +383,9 @@ data class KmpFunction(
      * method names in the generated bridge.
      *
      * Strips a trailing `"Flow"` suffix (case-insensitive) when present.
-     * Examples: `"authStateFlow"` → `"authState"`, `"ticker"` → `"ticker"`.
+     * Examples: `"authStateFlow"` → `"authState"`, `"ticker"` → `"ticker"`. Note the
+     * case-insensitive match also strips e.g. `"overflow"` → `"over"` — avoid flow function
+     * names that merely end in "flow".
      */
     val flowBaseName: String
         get() = if (name.endsWith("Flow", ignoreCase = true)) name.dropLast(4) else name
@@ -567,6 +571,25 @@ fun KmpTypeArg.typeOrNull(): KmpTypeRef? = when (this) {
 }
 
 /**
+ * Whether any parameter or return type of this function contains a `Map` whose key is a
+ * concrete non-`String` type. JS objects are string-keyed, so such functions cannot cross the
+ * bridge faithfully — generators skip them with a message. Star-projected keys (`Map<*, *>`)
+ * are given the benefit of the doubt and typed `unknown`/`Any` instead.
+ */
+fun KmpFunction.usesNonStringKeyMap(): Boolean {
+    fun KmpTypeRef.bad(): Boolean = when (this) {
+        is KmpTypeRef.CollectionType -> {
+            val key = if (kind == CollectionKind.MAP) typeArgs.getOrNull(0)?.typeOrNull() else null
+            val badKey = key != null && !(key is KmpTypeRef.Primitive && key.kind == PrimitiveKind.STRING)
+            badKey || typeArgs.any { it.typeOrNull()?.bad() == true }
+        }
+        is KmpTypeRef.FlowType -> typeArg.typeOrNull()?.bad() == true
+        else -> false
+    }
+    return params.any { it.type.bad() } || returnType.bad()
+}
+
+/**
  * Whether a JS implementation of this interface/abstract class can be generated: the platform
  * bridge creates an anonymous subtype overriding every member, which is only possible when the
  * type has no abstract properties, and — for an abstract class — a zero-arg constructor and no
@@ -595,8 +618,8 @@ fun KmpDeclaration.jsImplementabilityGap(): String? = when {
  * Standard Kotlin collection families representable as [KmpTypeRef.CollectionType].
  *
  * Only the three core read-only interfaces are modelled; mutable variants (`MutableList` etc.)
- * and concrete implementations (`ArrayList` etc.) are normalized to the nearest read-only
- * interface by the klib reader.
+ * plus `Collection`/`Iterable` normalize to these. Concrete implementation types (`ArrayList`
+ * etc.) are NOT recognized and fall through to [KmpTypeRef.ClassRef].
  */
 enum class CollectionKind {
     /** `kotlin.collections.List<T>` */

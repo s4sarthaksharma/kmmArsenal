@@ -22,6 +22,8 @@ object AndroidGenerator {
         val enumNames      = module.declarations.filterIsInstance<KmpDeclaration.KmpEnum>().map { it.name }.toSet()
         val dataClassNames = module.declarations.filterIsInstance<KmpDeclaration.KmpDataClass>().map { it.name }.toSet()
         val sealedNames    = module.declarations.filterIsInstance<KmpDeclaration.KmpSealedClass>().map { it.name }.toSet()
+        val interfaceNames = module.declarations.filterIsInstance<KmpDeclaration.KmpInterface>().map { it.name }.toSet()
+        val abstractNames  = module.declarations.filterIsInstance<KmpDeclaration.KmpClass>().filter { it.isAbstract }.map { it.name }.toSet()
 
         val records = sourceFile.declarations.filterIsInstance<KmpDeclaration.KmpDataClass>()
             .filter { dc ->
@@ -76,7 +78,7 @@ object AndroidGenerator {
         val moduleBodies = mutableListOf<String>()
 
         for (record in records) {
-            val (imports, body) = generateRecord(record, module, kmpPackageName)
+            val (imports, body) = generateRecord(record, kmpPackageName, enumNames, dataClassNames, sealedNames)
             allImports.addAll(imports)
             recordBodies.add(body)
         }
@@ -90,13 +92,13 @@ object AndroidGenerator {
         val takenNames = (modules.filter { it !is KmpDeclaration.KmpFileScope } + interfaceDecls).map { it.declName() }.toSet()
         for (decl in modules) {
             val nameOverride = if (decl is KmpDeclaration.KmpFileScope && decl.fileName in takenNames) "${decl.fileName}Kt" else null
-            val (imports, body) = buildModuleBody(decl, module, kmpPackageName, enumNames, dataClassNames, sealedNames, onSkip, moduleNameOverride = nameOverride)
+            val (imports, body) = buildModuleBody(decl, kmpPackageName, enumNames, dataClassNames, sealedNames, interfaceNames, abstractNames, onSkip, moduleNameOverride = nameOverride)
             allImports.addAll(imports)
             moduleBodies.add(body)
         }
 
         for (decl in interfaceDecls) {
-            val (imports, body) = buildInterfaceModuleBody(decl, module, kmpPackageName, enumNames, dataClassNames, sealedNames, onSkip)
+            val (imports, body) = buildInterfaceModuleBody(decl, kmpPackageName, enumNames, dataClassNames, sealedNames, interfaceNames, abstractNames, onSkip)
             allImports.addAll(imports)
             moduleBodies.add(body)
         }
@@ -136,13 +138,11 @@ object AndroidGenerator {
      */
     fun generateRecord(
         decl: KmpDeclaration.KmpDataClass,
-        module: KmpModule,
         kmpPackageName: String,
+        enumNames: Set<String>,
+        dataClassNames: Set<String>,
+        sealedNames: Set<String>,
     ): Pair<Set<String>, String> {
-        val enumNames      = module.declarations.filterIsInstance<KmpDeclaration.KmpEnum>().map { it.name }.toSet()
-        val dataClassNames = module.declarations.filterIsInstance<KmpDeclaration.KmpDataClass>().map { it.name }.toSet()
-        val sealedNames    = module.declarations.filterIsInstance<KmpDeclaration.KmpSealedClass>().map { it.name }.toSet()
-
         val imports = mutableSetOf(
             "expo.modules.kotlin.records.Field",
             "expo.modules.kotlin.records.Record",
@@ -315,11 +315,12 @@ object AndroidGenerator {
      */
     private fun buildModuleBody(
         decl: KmpDeclaration,
-        module: KmpModule,
         kmpPackageName: String,
         enumNames: Set<String>,
         dataClassNames: Set<String>,
         sealedNames: Set<String>,
+        interfaceNames: Set<String>,
+        abstractNames: Set<String>,
         onSkip: (String) -> Unit = {},
         moduleNameOverride: String? = null,
     ): Pair<Set<String>, String> {
@@ -337,8 +338,6 @@ object AndroidGenerator {
         val hasFlows   = flows.isNotEmpty()
         val eventNames = flows.map { "on${it.flowBaseName.cap()}Update" }
         val usedEnums  = enumNames.filter { eName -> functions.any { fn -> fn.referencesEnum(eName) } }
-        val interfaceNames = module.declarations.filterIsInstance<KmpDeclaration.KmpInterface>().map { it.name }.toSet()
-        val abstractNames  = module.declarations.filterIsInstance<KmpDeclaration.KmpClass>().filter { it.isAbstract }.map { it.name }.toSet()
         // callTarget: object → type name (singleton), file scope → package name (FQN call), class → unused (uses instance map)
         val callTarget = when {
             isObject    -> name
@@ -490,11 +489,12 @@ object AndroidGenerator {
      */
     private fun buildInterfaceModuleBody(
         decl: KmpDeclaration,
-        module: KmpModule,
         kmpPackageName: String,
         enumNames: Set<String>,
         dataClassNames: Set<String>,
         sealedNames: Set<String>,
+        interfaceNames: Set<String>,
+        abstractNames: Set<String>,
         onSkip: (String) -> Unit = {},
     ): Pair<Set<String>, String> {
         val name = decl.declName()
@@ -512,8 +512,6 @@ object AndroidGenerator {
         val eventNames = flows.map { "on${it.flowBaseName.cap()}Update" } +
             (if (jsImplementable) functions.filter { it.kind == FunctionKind.SUSPEND }.map { "call${it.name.cap()}" } else emptyList())
         val usedEnums = enumNames.filter { eName -> functions.any { fn -> fn.referencesEnum(eName) } }
-        val interfaceNames = module.declarations.filterIsInstance<KmpDeclaration.KmpInterface>().map { it.name }.toSet()
-        val abstractNames  = module.declarations.filterIsInstance<KmpDeclaration.KmpClass>().filter { it.isAbstract }.map { it.name }.toSet()
 
         val imports = mutableSetOf<String>()
         imports.add("$kmpPackageName.$name")
@@ -717,6 +715,16 @@ object AndroidGenerator {
             onSkip(msg)
             return "    // $msg\n"
         }
+        if (fn.usesNonStringKeyMap()) {
+            val msg = "BRIDGE SKIPPED: ${fn.name}() — Map with non-String keys is not bridgeable (JS objects are string-keyed)."
+            onSkip(msg)
+            return "    // $msg\n"
+        }
+        if (fn.isPropertyGetter && fn.returnType is KmpTypeRef.FlowType) {
+            val msg = "BRIDGE SKIPPED: ${fn.name} — Flow-typed properties have no start/stop bridge surface yet."
+            onSkip(msg)
+            return "    // $msg\n"
+        }
         val sb  = StringBuilder()
         val ret = fn.returnType.toReturnSuffix(enumNames, dataClassNames, sealedNames, interfaceNames, abstractNames)
         val instanceExpr = when {
@@ -727,7 +735,6 @@ object AndroidGenerator {
         }
         val ownParams = fn.params.joinToString(", ") { "${it.name}: ${it.type.toBridgeParamType(enumNames, interfaceNames, abstractNames, dataClassNames, sealedNames)}" }
         val callArgs  = fn.params.joinToString(", ") { it.type.toCallArg(it.name, enumNames, interfaceNames, abstractNames, dataClassNames, sealedNames) }
-        sb.append(formatComment(fn.docComment))
         if (!isInstanceBased && fn.params.isEmpty()) {
             sb.appendLine("""    Function("${fn.name}") {""")
             if (fn.isPropertyGetter) {
@@ -776,6 +783,11 @@ object AndroidGenerator {
         val effectiveParamCount = fn.params.size + if (isInstanceBased) 1 else 0
         if (effectiveParamCount > MAX_EXPO_FUNCTION_PARAMS) {
             val msg = "BRIDGE SKIPPED: ${fn.name}(${fn.params.size} params) — Expo AsyncFunction DSL supports max $MAX_EXPO_FUNCTION_PARAMS parameters."
+            onSkip(msg)
+            return "    // $msg\n"
+        }
+        if (fn.usesNonStringKeyMap()) {
+            val msg = "BRIDGE SKIPPED: ${fn.name}() — Map with non-String keys is not bridgeable (JS objects are string-keyed)."
             onSkip(msg)
             return "    // $msg\n"
         }
@@ -860,6 +872,11 @@ object AndroidGenerator {
         val effectiveParamCount = fn.params.size + if (isInstanceBased) 1 else 0
         if (effectiveParamCount > MAX_EXPO_FUNCTION_PARAMS) {
             val msg = "BRIDGE SKIPPED: ${fn.name}(${fn.params.size} params) — Expo Function DSL supports max $MAX_EXPO_FUNCTION_PARAMS parameters."
+            onSkip(msg)
+            return "    // $msg\n"
+        }
+        if (fn.usesNonStringKeyMap()) {
+            val msg = "BRIDGE SKIPPED: ${fn.name}() — Map with non-String keys is not bridgeable (JS objects are string-keyed)."
             onSkip(msg)
             return "    // $msg\n"
         }
@@ -1566,36 +1583,6 @@ object AndroidGenerator {
 }
 
 // ── File-level helpers ────────────────────────────────────────────────────────
-
-/**
- * Reformats a KMP KDoc/line comment (as captured by the klib reader) into indented `//` line
- * comments suitable for placing directly above a generated Expo `Function`/`AsyncFunction`
- * block.
- *
- * Strips `/**`, `*/`, leading `*`, and `//` comment markup from each line; blank lines are
- * dropped entirely.
- *
- * @return the reformatted comment block (each line indented by [indent], terminated by a
- *         trailing newline), or `""` if [docComment] is `null` or contains no non-blank content.
- */
-private fun formatComment(docComment: String?, indent: String = "    "): String {
-    if (docComment == null) return ""
-    val lines = docComment.lines().mapNotNull { line ->
-        val content = line.trim()
-            .removePrefix("/**").removePrefix("*/").removePrefix("/*")
-            .let {
-                when {
-                    it.startsWith("* ") -> it.drop(2)
-                    it.startsWith("*")  -> it.drop(1).trimStart()
-                    it.startsWith("// ") -> it.drop(3)
-                    it.startsWith("//")  -> it.drop(2).trimStart()
-                    else -> it
-                }
-            }.trim()
-        if (content.isBlank()) null else "$indent// $content"
-    }
-    return if (lines.isEmpty()) "" else lines.joinToString("\n") + "\n"
-}
 
 /** Uppercases the first character, e.g. for turning a lowerCamelCase name into a type name. */
 private fun String.cap()  = replaceFirstChar { it.uppercase() }

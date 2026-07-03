@@ -29,7 +29,8 @@ import java.io.File
  */
 object KlibApiReader {
 
-    /** Compiler-synthesized `data class` member names that are never meaningful to bridge. */
+    /** Compiler-synthesized member names filtered on `data class`es only — user-declared
+     *  functions with these names on other types are real API members and are bridged. */
     private val SKIP_FUNCTION_NAMES = setOf("hashCode", "equals", "toString", "copy")
 
     /** Matches synthesized `componentN()` destructuring functions on data classes, to exclude them. */

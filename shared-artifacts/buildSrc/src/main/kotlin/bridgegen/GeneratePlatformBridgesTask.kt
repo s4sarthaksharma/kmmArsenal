@@ -75,6 +75,26 @@ abstract class GeneratePlatformBridgesTask : DefaultTask() {
         val androidPkg = androidPackage.get()
         val module     = KlibApiReader.read(klibDir.get().asFile, pkg, sourceDir.get().asFile, onSkip = { logger.quiet("\n  >> [Reader] $it") })
 
+        // The generators' type-name sets are keyed by simple name only; a simple-name collision
+        // across sub-packages/files silently resolves to the wrong conversion. Warn early.
+        // (File scopes are excluded — a file sharing its declaration's name is the normal case
+        // and is disambiguated with the Kt suffix.)
+        module.declarations
+            .mapNotNull { d ->
+                when (d) {
+                    is KmpDeclaration.KmpFileScope -> null
+                    is KmpDeclaration.KmpClass -> d.name
+                    is KmpDeclaration.KmpInterface -> d.name
+                    is KmpDeclaration.KmpObject -> d.name
+                    is KmpDeclaration.KmpDataClass -> d.name
+                    is KmpDeclaration.KmpSealedClass -> d.name
+                    is KmpDeclaration.KmpEnum -> d.name
+                }
+            }
+            .groupingBy { it }.eachCount().filterValues { it > 1 }.keys.forEach { dup ->
+                logger.warn("  !! Duplicate simple name '$dup' in the bridged API surface — generated conversions may resolve to the wrong type.")
+            }
+
         val androidOut     = androidOutDir.get().asFile
         val iosOut         = iosOutDir.get().asFile
         val tsOut          = tsOutDir.get().asFile

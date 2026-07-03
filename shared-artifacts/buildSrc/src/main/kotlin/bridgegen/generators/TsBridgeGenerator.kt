@@ -131,24 +131,16 @@ object TsBridgeGenerator {
                 }
             }
 
-            // 4. Type-only interfaces/abstracts (no functions)
+            // 4. Type-only interfaces/abstracts (no functions — an empty marker type is all
+            //    there is to declare; anything with functions became a runtime wrapper above)
             for (decl in interfaceTypesOnly) {
                 val declName = when (decl) {
                     is KmpDeclaration.KmpInterface -> decl.name
                     is KmpDeclaration.KmpClass     -> decl.name
                     else -> continue
                 }
-                val fns = when (decl) {
-                    is KmpDeclaration.KmpInterface -> decl.functions
-                    is KmpDeclaration.KmpClass     -> decl.functions
-                    else -> emptyList()
-                }
                 appendLine()
-                appendLine("export interface $declName {")
-                for (fn in fns) {
-                    appendInterfaceMethod(fn, enumNames, dataNames, sealedNames, interfaceNames, abstractNames)
-                }
-                appendLine("}")
+                appendLine("export interface $declName {}")
             }
 
             if (!hasBridgeable) return@buildString
@@ -290,49 +282,6 @@ object TsBridgeGenerator {
     }
 
     /**
-     * Appends one method signature line to a type-only `export interface` body (see [generate],
-     * step 4) — for an interface/abstract class with no functions to bridge, so nothing else
-     * generates a runtime implementation for it.
-     *
-     * Sync/suspend methods appear as plain (possibly `Promise`-wrapped) method signatures; a
-     * Flow method expands into its `start`/`stop`/`add<Name>Listener` triplet, mirroring the
-     * shape the native bridge would expose if this type were ever made runtime-backed.
-     */
-    private fun StringBuilder.appendInterfaceMethod(
-        fn: KmpFunction,
-        enumNames: Set<String>,
-        dataNames: Set<String>,
-        sealedNames: Set<String>,
-        interfaceNames: Set<String>,
-        abstractNames: Set<String>,
-    ) {
-        when (fn.kind) {
-            FunctionKind.SYNC -> {
-                val params = fn.params.joinToString(", ") {
-                    "${it.name}: ${it.type.toTsType(enumNames, dataNames, sealedNames, interfaceNames, abstractNames)}"
-                }
-                val ret = fn.returnType.toTsType(enumNames, dataNames, sealedNames, interfaceNames, abstractNames)
-                appendLine("  ${fn.name}($params): $ret")
-            }
-            FunctionKind.SUSPEND -> {
-                val params = fn.params.joinToString(", ") {
-                    "${it.name}: ${it.type.toTsType(enumNames, dataNames, sealedNames, interfaceNames, abstractNames)}"
-                }
-                val ret = fn.returnType.toTsType(enumNames, dataNames, sealedNames, interfaceNames, abstractNames)
-                appendLine("  ${fn.name}($params): Promise<$ret>")
-            }
-            FunctionKind.FLOW -> {
-                val base = fn.flowBaseName
-                val cap  = base.replaceFirstChar { it.uppercase() }
-                val valueType = fn.returnType.toTsType(enumNames, dataNames, sealedNames, interfaceNames, abstractNames)
-                appendLine("  start$cap(): void")
-                appendLine("  stop$cap(): void")
-                appendLine("  add${cap}Listener(handler: (event: { value: $valueType }) => void): void")
-            }
-        }
-    }
-
-    /**
      * Appends one method to a flat object-literal wrapper (`export const Foo = { ... }`) for an
      * `object` or file-scope module, calling straight through to the `requireNativeModule`
      * handle captured in [moduleName]'s `_<name>` const.
@@ -355,6 +304,14 @@ object TsBridgeGenerator {
         abstractNames: Set<String>,
         onSkip: (String) -> Unit = {},
     ) {
+        if (fn.usesNonStringKeyMap()) {
+            onSkip("FUNCTION SKIPPED: $moduleName.${fn.name}() — Map with non-String keys is not bridgeable (JS objects are string-keyed).")
+            return
+        }
+        if (fn.isPropertyGetter && fn.returnType is KmpTypeRef.FlowType) {
+            onSkip("FUNCTION SKIPPED: $moduleName.${fn.name} — Flow-typed properties have no start/stop bridge surface yet.")
+            return
+        }
         val native = "_$moduleName"
         when (fn.kind) {
             FunctionKind.SYNC -> {
@@ -448,6 +405,14 @@ object TsBridgeGenerator {
         abstractNames: Set<String>,
         onSkip: (String) -> Unit = {},
     ) {
+        if (fn.usesNonStringKeyMap()) {
+            onSkip("FUNCTION SKIPPED: $moduleName.${fn.name}() — Map with non-String keys is not bridgeable (JS objects are string-keyed).")
+            return
+        }
+        if (fn.isPropertyGetter && fn.returnType is KmpTypeRef.FlowType) {
+            onSkip("FUNCTION SKIPPED: $moduleName.${fn.name} — Flow-typed properties have no start/stop bridge surface yet.")
+            return
+        }
         val native = "_$moduleName"
         when (fn.kind) {
             FunctionKind.SYNC -> {

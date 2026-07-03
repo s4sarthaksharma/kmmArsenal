@@ -102,8 +102,12 @@ interface FixtureRepository {
     fun findById(id: String): FixtureUser                   // SYNC, ClassRef return
     suspend fun fetchById(id: String): FixtureUser           // SUSPEND, ClassRef return
     suspend fun countAll(): Int                              // SUSPEND, numeric return (resolve wire contract)
+    suspend fun findByStatus(status: FixtureStatus): Int     // SUSPEND, enum param (call<Fn> event payload)
     fun observeAll(): Flow<List<FixtureUser>>                // FLOW, nested Collection+ClassRef
 }
+
+/** Zero-function marker interface — TS emits a type-only interface, no runtime wrapper. */
+interface FixtureMarker
 
 // ── Object ────────────────────────────────────────────────────────────────────
 
@@ -196,6 +200,9 @@ class FixtureCollectionsApi {
     // Star projection (*)
     fun starList(): List<*> = emptyList<Any>()
     fun starMap(): Map<*, *> = emptyMap<Any, Any>()
+
+    // Non-String map key — must be skipped loudly (JS objects are string-keyed)
+    fun badMap(): Map<Int, String> = emptyMap()
 }
 
 // ── Concrete class — all async patterns ───────────────────────────────────────
@@ -375,6 +382,12 @@ var fixtureMutableCounter: Int = 0
 val fixtureActiveStatus: FixtureStatus = FixtureStatus.ACTIVE
 val fixtureNullableUser: FixtureUser? = null
 
+/** Flow-typed property — must be skipped loudly (no start/stop surface for property flows). */
+val fixtureCounterStream: Flow<Int> = flow {
+    var i = 0
+    while (true) { emit(i++); delay(1_000) }
+}
+
 // ── File-level functions ──────────────────────────────────────────────────────
 
 /** Typealias in a signature must resolve to its expansion (String), not the alias name. */
@@ -450,6 +463,7 @@ class FixtureInterfaceApi {
         )
         override suspend fun fetchById(id: String): FixtureUser = findById(id)
         override suspend fun countAll(): Int = 42
+        override suspend fun findByStatus(status: FixtureStatus): Int = if (status == FixtureStatus.ACTIVE) 1 else 0
         override fun observeAll(): Flow<List<FixtureUser>> = flow { emit(listOf(findById("all"))) }
     }
 
