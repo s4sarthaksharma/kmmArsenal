@@ -510,7 +510,7 @@ object AndroidGenerator {
         // The call<Fn> reverse-bridge events only exist when a JS implementation can be created.
         val jsImplementable = decl.isJsImplementable()
         val eventNames = flows.map { "on${it.flowBaseName.cap()}Update" } +
-            (if (jsImplementable) functions.filter { it.kind == FunctionKind.SUSPEND }.map { "call${it.name.cap()}" } else emptyList())
+            (if (jsImplementable) decl.proxiedSuspendFunctions().map { "call${it.name.cap()}" } else emptyList())
         val usedEnums = enumNames.filter { eName -> functions.any { fn -> fn.referencesEnum(eName) } }
 
         val imports = mutableSetOf<String>()
@@ -610,15 +610,37 @@ object AndroidGenerator {
             return imports to sb.toString()
         }
         val isAbstractClass = decl is KmpDeclaration.KmpClass && (decl as KmpDeclaration.KmpClass).isAbstract
-        val implBase = if (isAbstractClass) "$name()" else name
-        val suspendFns = functions.filter { it.kind == FunctionKind.SUSPEND }
+        // Abstract-class constructor parameters thread through create(...) into super(...).
+        val ctorFields = if (isAbstractClass) (decl as KmpDeclaration.KmpClass).ctorFields else emptyList()
+        if (ctorFields.size > MAX_EXPO_FUNCTION_PARAMS) {
+            val msg = "CREATE SKIPPED: $name — constructor has more than $MAX_EXPO_FUNCTION_PARAMS parameters."
+            onSkip(msg)
+            sb.appendLine()
+            sb.appendLine("    // $msg")
+            sb.appendLine("  }")
+            sb.append("}")
+            return imports to sb.toString()
+        }
+        for (f in ctorFields) collectClassRefImports(f.type, enumNames, dataClassNames, sealedNames, kmpPackageName, imports)
+        val ctorParams = ctorFields.joinToString(", ") { "${it.name}: ${it.type.toBridgeParamType(enumNames, interfaceNames, abstractNames, dataClassNames, sealedNames)}" }
+        val ctorArgs   = ctorFields.joinToString(", ") { it.type.toCallArg(it.name, enumNames, interfaceNames, abstractNames, dataClassNames, sealedNames) }
+        val implBase = if (isAbstractClass) "$name($ctorArgs)" else name
+        // Abstract classes: only abstract members are overridden — concrete members are
+        // inherited from the real KMP class. Interfaces: every member is overridden (iOS's
+        // ObjC-runtime conformance cannot inherit Kotlin default impls; keep platforms aligned).
+        val overrideFns = if (isAbstractClass) functions.filter { it.isAbstractMember } else functions
+        val suspendFns = decl.proxiedSuspendFunctions()
 
         sb.appendLine()
-        sb.appendLine("""    Function("create") {""")
+        if (ctorParams.isEmpty()) {
+            sb.appendLine("""    Function("create") {""")
+        } else {
+            sb.appendLine("""    Function("create") { $ctorParams ->""")
+        }
         sb.appendLine("      val instanceId = UUID.randomUUID().toString()")
         sb.appendLine("      val emitEvent = { eventName: String, body: Map<String, Any?> -> sendEvent(eventName, body) }")
         sb.appendLine("      val impl = object : $implBase {")
-        for (fn in functions) {
+        for (fn in overrideFns) {
             val pList = fn.params.joinToString(", ") { "${it.name}: ${it.type.toKotlinTypeName()}" }
             val retT  = fn.returnType.toKotlinTypeName()
             when (fn.kind) {

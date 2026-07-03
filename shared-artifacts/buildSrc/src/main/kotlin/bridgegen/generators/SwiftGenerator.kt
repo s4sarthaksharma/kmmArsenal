@@ -493,8 +493,12 @@ object SwiftGenerator {
         }
         if (bridgeable.isEmpty()) return
 
-        val suspendFns = allFns.filter { it.kind == FunctionKind.SUSPEND }
+        // Interfaces proxy every suspend member; abstract classes only abstract ones —
+        // concrete members are inherited from the real KMP class.
+        val suspendFns = decl.proxiedSuspendFunctions()
         val hasSuspend = suspendFns.isNotEmpty()
+        // Abstract-class constructor parameters thread through create(...) into super.init(...).
+        val ctorFields = if (isAbstract) (decl as KmpDeclaration.KmpClass).ctorFields else emptyList()
         val flows      = bridgeable.filter { it.kind == FunctionKind.FLOW }
         val hasFlows   = flows.isNotEmpty()
 
@@ -508,21 +512,24 @@ object SwiftGenerator {
         val allEvents  = flowEvents + callEvents
 
         // ── JS impl class ─────────────────────────────────────────────────────
-        val superInit = if (isAbstract) "\n    super.init()" else ""
+        val ctorInitParams = ctorFields.joinToString("") { ", ${it.name}: ${it.type.toSwiftNativeType(enumNames, dataNames, sealedNames)}" }
+        val superArgs      = ctorFields.joinToString(", ") { "${it.name}: ${it.name}" }
+        val superInit      = if (isAbstract) "\n    super.init($superArgs)" else ""
 
         if (!jsImplementable) {
             appendLine("// create() not generated for $name — cannot be JS-implemented (${decl.jsImplementabilityGap()}).")
         } else if (isAbstract) {
-            // Abstract class: subclass and override SKIE's __ prefixed methods
+            // Abstract class: subclass; only abstract members are overridden (SKIE's __ prefixed
+            // completion-handler form for suspend) — concrete members are inherited.
             appendLine("fileprivate class ${name}JsImpl: $name {")
             appendLine("  private let instanceId: String")
             appendLine("  private let emit: (String, [String: Any?]) -> Void")
-            appendLine("  init(instanceId: String, emit: @escaping (String, [String: Any?]) -> Void) {")
+            appendLine("  init(instanceId: String$ctorInitParams, emit: @escaping (String, [String: Any?]) -> Void) {")
             appendLine("    self.instanceId = instanceId")
             appendLine("    self.emit = emit$superInit")
             appendLine("  }")
 
-            for (fn in allFns) {
+            for (fn in allFns.filter { it.isAbstractMember }) {
                 appendLine()
                 val pListNative = fn.params.joinToString(", ") { p ->
                     "${p.name}: ${p.type.toSwiftNativeType(enumNames, dataNames, sealedNames)}"
@@ -664,12 +671,26 @@ object SwiftGenerator {
             appendLine("    }")
         }
 
-        // create() — instantiates JS impl class (only when JS-implementable)
+        // create() — instantiates JS impl class (only when JS-implementable);
+        // abstract-class ctor params arrive as bridge types and convert before the init call.
         if (jsImplementable) {
+            val createParams = ctorFields.joinToString(", ") { "${it.name}: ${it.type.toSwiftBridgeType(enumNames, dataNames, sealedNames)}" }
+            val ctorArgDecls = ctorFields.map { f ->
+                val (prefix, arg) = f.type.toSwiftCallArgWithPrefix(f.name, enumNames, dataNames, sealedNames)
+                if (prefix.isEmpty() && arg == f.name) null to ", ${f.name}: ${f.name}"
+                else "      let __${f.name} = ${prefix}$arg" to ", ${f.name}: __${f.name}"
+            }
+            val ctorPassArgs = ctorArgDecls.joinToString("") { it.second }
+            val createThrows = if (ctorArgDecls.any { it.first?.contains("try ") == true }) " throws" else ""
             appendLine()
-            appendLine("""    Function("create") {""")
+            if (createParams.isEmpty()) {
+                appendLine("""    Function("create") {""")
+            } else {
+                appendLine("""    Function("create") { ($createParams)$createThrows in""")
+            }
+            ctorArgDecls.mapNotNull { it.first }.forEach { appendLine(it) }
             appendLine("      let instanceId = UUID().uuidString")
-            appendLine("      let impl = ${name}JsImpl(instanceId: instanceId) { [weak self] name, body in")
+            appendLine("      let impl = ${name}JsImpl(instanceId: instanceId$ctorPassArgs) { [weak self] name, body in")
             appendLine("        self?.sendEvent(name, body)")
             appendLine("      }")
             if (isAbstract) {

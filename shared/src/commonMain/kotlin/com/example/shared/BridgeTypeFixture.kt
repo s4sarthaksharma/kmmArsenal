@@ -135,11 +135,22 @@ abstract class FixtureBaseProcessor {
 }
 
 /**
- * Abstract class that CANNOT be JS-implemented: constructor parameter + final concrete function.
- * The generators must still bridge the KMP-implemented direction but skip create()/resolve.
+ * Abstract class with a constructor parameter and a final concrete function — JS-implementable:
+ * create(label) threads the ctor arg through, describe() is inherited (not overridden), and
+ * only the abstract run() proxies back to JS.
  */
 abstract class FixtureConfiguredProcessor(val label: String) {
     fun describe(): String = "processor:$label"
+    abstract suspend fun run(input: String): String
+}
+
+/**
+ * Abstract class that CANNOT be JS-implemented: abstract property (properties are not read into
+ * the model, so the anonymous subclass could not override it). KMP-implemented direction still
+ * bridges; create()/resolve are skipped with a message.
+ */
+abstract class FixtureStatefulProcessor {
+    abstract val state: String
     abstract suspend fun run(input: String): String
 }
 
@@ -478,6 +489,11 @@ class FixtureInterfaceApi {
 
     fun getConfigured(): FixtureConfiguredProcessor = object : FixtureConfiguredProcessor("fixture") {
         override suspend fun run(input: String): String = "ran:$input"
+    }
+
+    fun getStateful(): FixtureStatefulProcessor = object : FixtureStatefulProcessor() {
+        override val state: String = "ready"
+        override suspend fun run(input: String): String = "stateful:$input"
     }
 
     fun processRepo(repo: FixtureRepository): String = repo.findById("fixture-param").id

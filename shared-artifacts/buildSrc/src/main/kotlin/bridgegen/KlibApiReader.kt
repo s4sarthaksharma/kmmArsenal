@@ -291,9 +291,7 @@ object KlibApiReader {
                 isAbstract     = modality == ProtoBuf.Modality.ABSTRACT,
                 functions      = readFunctions(cls, nr, tt, context = name, onSkip = onSkip),
                 typeParameters = cls.typeParameterList.map { nr.getString(it.name) },
-                hasZeroArgConstructor = cls.constructorList
-                    .firstOrNull { !Flags.IS_SECONDARY.get(it.flags) }
-                    ?.valueParameterList?.isEmpty() ?: true,
+                ctorFields            = primaryConstructorFields(cls, nr, tt),
                 hasAbstractProperties = hasAbstractProperties(cls),
             )
         }
@@ -407,11 +405,12 @@ object KlibApiReader {
         }
 
         return KmpFunction(
-            name          = name,
-            kind          = kind,
-            params        = params,
-            returnType    = effectiveReturn,
-            isOverridable = Flags.MODALITY.get(func.flags) != ProtoBuf.Modality.FINAL,
+            name             = name,
+            kind             = kind,
+            params           = params,
+            returnType       = effectiveReturn,
+            isOverridable    = Flags.MODALITY.get(func.flags) != ProtoBuf.Modality.FINAL,
+            isAbstractMember = Flags.MODALITY.get(func.flags) == ProtoBuf.Modality.ABSTRACT,
         )
     }
 

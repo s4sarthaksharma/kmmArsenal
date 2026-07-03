@@ -212,7 +212,21 @@ object TsBridgeGenerator {
                 appendLine("  /** @internal */")
                 appendLine("  static _wrap(handle: string): $declName { return new $declName(handle) }")
                 if (jsImplementable) {
-                    appendLine("  static create(): $declName { return $declName._wrap(_$declName.create()) }")
+                    // Abstract-class constructor params thread through create(...).
+                    val ctorFields = (decl as? KmpDeclaration.KmpClass)?.ctorFields ?: emptyList()
+                    if (ctorFields.size > MAX_EXPO_FUNCTION_PARAMS) {
+                        onSkip("CREATE SKIPPED: $declName — constructor has more than $MAX_EXPO_FUNCTION_PARAMS parameters.")
+                    } else {
+                        val cParams = ctorFields.joinToString(", ") {
+                            "${it.name}: ${it.type.toTsType(enumNames, dataNames, sealedNames, interfaceNames, abstractNames, wrapperMode = true)}"
+                        }
+                        val cArgs = ctorFields.joinToString(", ") { f ->
+                            val fRef = f.type as? KmpTypeRef.ClassRef
+                            val isIface = fRef != null && (fRef.simpleName in interfaceNames || fRef.simpleName in abstractNames)
+                            when { !isIface -> f.name; fRef!!.nullable -> "${f.name}?._handle ?? null"; else -> "${f.name}._handle" }
+                        }
+                        appendLine("  static create($cParams): $declName { return $declName._wrap(_$declName.create($cArgs)) }")
+                    }
                 }
                 appendLine()
                 appendLine("  destroy(): void { _$declName.destroy(this._handle) }")
@@ -220,8 +234,10 @@ object TsBridgeGenerator {
                     appendLine()
                     appendInstanceWrapperFunction(fn, declName, enumNames, dataNames, sealedNames, interfaceNames, abstractNames, onSkip)
                 }
-                // Task 5: reverse-bridge listener + resolve per SUSPEND method
-                for (fn in (if (jsImplementable) fns.filter { it.kind == FunctionKind.SUSPEND } else emptyList())) {
+                // Task 5: reverse-bridge listener + resolve per proxied SUSPEND method
+                // (interfaces proxy all suspend members; abstract classes only abstract ones —
+                // concrete members are inherited natively and never call back into JS)
+                for (fn in (if (jsImplementable) decl.proxiedSuspendFunctions() else emptyList())) {
                     val fnCap        = fn.name.replaceFirstChar { it.uppercase() }
                     val eventName    = "call$fnCap"
                     val listenerName = "add${eventName.replaceFirstChar { it.uppercase() }}Listener"

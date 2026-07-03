@@ -92,8 +92,9 @@ sealed class KmpDeclaration {
      * @property isAbstract  Whether the Kotlin declaration carries the `abstract` modifier.
      * @property functions   Public functions declared on this class, in source order.
      * @property docComment  Reserved for KDoc; currently never populated (klib metadata carries no comments).
-     * @property hasZeroArgConstructor Whether the primary constructor takes no parameters —
-     *                       a JS-implemented anonymous subclass can only extend such a class.
+     * @property ctorFields  Primary constructor parameters — for an abstract class these are
+     *                       threaded through the generated `create(...)` so a JS-implemented
+     *                       anonymous subclass can call `super(...)`.
      * @property hasAbstractProperties Whether any public property is abstract — an anonymous
      *                       subclass would have to override it, which generators cannot emit
      *                       (properties are not read into the model).
@@ -105,7 +106,7 @@ sealed class KmpDeclaration {
         val functions: List<KmpFunction>,
         val typeParameters: List<String> = emptyList(),
         val docComment: String? = null,
-        val hasZeroArgConstructor: Boolean = true,
+        val ctorFields: List<KmpField> = emptyList(),
         val hasAbstractProperties: Boolean = false,
     ) : KmpDeclaration()
 
@@ -377,6 +378,9 @@ data class KmpFunction(
      *  anonymous subclass can only override overridable members. Always true for interface
      *  members; meaningless for top-level functions. */
     val isOverridable: Boolean = true,
+    /** Whether the member is `abstract` — on an abstract class, only abstract members are
+     *  overridden by the JS-implemented anonymous subclass; concrete members are inherited. */
+    val isAbstractMember: Boolean = false,
 ) {
     /**
      * Base name for a [FunctionKind.FLOW] function, used to derive event names and start/stop
@@ -591,15 +595,16 @@ fun KmpFunction.usesNonStringKeyMap(): Boolean {
 
 /**
  * Whether a JS implementation of this interface/abstract class can be generated: the platform
- * bridge creates an anonymous subtype overriding every member, which is only possible when the
- * type has no abstract properties, and — for an abstract class — a zero-arg constructor and no
- * `final` member functions. Used by all three generators to decide whether to emit the
- * `create()` / `resolve<Fn>` reverse-bridge surface.
+ * bridge creates an anonymous subtype. Constructor parameters thread through the generated
+ * `create(...)`, and concrete (final/open) members of an abstract class are inherited rather
+ * than overridden — so the only remaining blocker is an abstract property, which would need an
+ * override the generators cannot emit (properties are not read into the model). Used by all
+ * three generators to decide whether to emit the `create()` / `resolve<Fn>` reverse-bridge
+ * surface.
  */
 fun KmpDeclaration.isJsImplementable(): Boolean = when (this) {
     is KmpDeclaration.KmpInterface -> !hasAbstractProperties
-    is KmpDeclaration.KmpClass ->
-        isAbstract && hasZeroArgConstructor && !hasAbstractProperties && functions.all { it.isOverridable }
+    is KmpDeclaration.KmpClass -> isAbstract && !hasAbstractProperties
     else -> false
 }
 
@@ -607,11 +612,20 @@ fun KmpDeclaration.isJsImplementable(): Boolean = when (this) {
  * Human-readable reason why [isJsImplementable] is false, for skip messages.
  * Returns `null` when the declaration IS JS-implementable.
  */
-fun KmpDeclaration.jsImplementabilityGap(): String? = when {
-    isJsImplementable() -> null
-    this is KmpDeclaration.KmpClass && !hasZeroArgConstructor -> "constructor has parameters"
-    this is KmpDeclaration.KmpClass && functions.any { !it.isOverridable } -> "has final member functions"
-    else -> "has abstract properties"
+fun KmpDeclaration.jsImplementabilityGap(): String? =
+    if (isJsImplementable()) null else "has abstract properties"
+
+/**
+ * The suspend functions a JS implementation proxies back to JS via `call<Fn>` events.
+ *
+ * Interfaces proxy every suspend member (iOS's ObjC-runtime conformance cannot inherit Kotlin
+ * default implementations, so all platforms proxy for consistency); abstract classes proxy only
+ * abstract suspend members — concrete ones are inherited from the real KMP class.
+ */
+fun KmpDeclaration.proxiedSuspendFunctions(): List<KmpFunction> = when (this) {
+    is KmpDeclaration.KmpInterface -> functions.filter { it.kind == FunctionKind.SUSPEND }
+    is KmpDeclaration.KmpClass -> functions.filter { it.kind == FunctionKind.SUSPEND && it.isAbstractMember }
+    else -> emptyList()
 }
 
 /**
