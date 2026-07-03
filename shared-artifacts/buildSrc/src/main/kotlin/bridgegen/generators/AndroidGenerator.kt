@@ -592,7 +592,7 @@ object AndroidGenerator {
                         append(""""instanceId" to instanceId, "callId" to callId""")
                         for (p in fn.params) append(""", "${p.name}" to ${p.name}""")
                     }
-                    val castExpr = fn.returnType.toKmpCastFromDeferred(enumNames, dataClassNames, sealedNames)
+                    val (_, castExpr) = fn.returnType.resolveWireContract(enumNames, dataClassNames, sealedNames)
                     sb.appendLine("        override suspend fun ${fn.name}($pList): $retT {")
                     sb.appendLine("          val callId = UUID.randomUUID().toString()")
                     sb.appendLine("          val deferred = CompletableDeferred<Any?>()")
@@ -615,7 +615,7 @@ object AndroidGenerator {
 
         for (fn in suspendFns) {
             val resolveName = "resolve${fn.name.cap()}"
-            val resultType  = fn.returnType.toResolveParamType(enumNames, dataClassNames, sealedNames)
+            val (resultType, _) = fn.returnType.resolveWireContract(enumNames, dataClassNames, sealedNames)
             sb.appendLine()
             if (resultType == null) {
                 sb.appendLine("""    Function("$resolveName") { instanceId: String, callId: String ->""")
@@ -1356,80 +1356,49 @@ object AndroidGenerator {
     // ── Task 5 helpers ────────────────────────────────────────────────────────
 
     /**
-     * The expression that casts a resolved `CompletableDeferred`'s `Any?` result back to this
-     * KMP type, inside a JS-implemented interface's suspend function override.
+     * The wire contract for a JS-implemented interface's suspend return value: the Kotlin type
+     * of the `resolve<Fn>` bridge function's `result` parameter, paired with the expression that
+     * converts the completed deferred's `Any?` value back to the real KMP return type.
      *
-     * The deferred is completed by the matching `resolve<Fn>` bridge function (see
-     * [buildInterfaceModuleBody]) with whatever JS passed for [toResolveParamType]; this is the
-     * inverse conversion, unwrapping the wire representation (`Double` for numerics, an
-     * enum-name `String`, a `Record` for data/sealed classes) back to the real KMP value.
+     * `resolve<Fn>` completes the deferred with exactly the declared parameter type (Expo
+     * converts the JS value into it), so the cast side must expect that same type — both sides
+     * live in this one `when` so they cannot drift. Nullable returns use safe casts so a JS
+     * `null` resolves to `null` instead of throwing.
+     *
+     * @return `null` param type for [KmpTypeRef.UnitType], since a `resolve<Fn>` for a
+     *         `Unit`-returning function takes no result parameter at all.
      */
-    private fun KmpTypeRef.toKmpCastFromDeferred(
+    private fun KmpTypeRef.resolveWireContract(
         enumNames: Set<String>,
         dataClassNames: Set<String>,
         sealedNames: Set<String>,
-    ): String {
+    ): Pair<String?, String> {
         val q = if (isNullable) "?" else ""
+        fun cast(wireType: String, convert: String = "") =
+            if (isNullable) "(deferred.await() as? $wireType)?$convert".removeSuffix("?")
+            else "(deferred.await() as $wireType)$convert"
         return when {
-            this is KmpTypeRef.UnitType -> "deferred.await()"
+            this is KmpTypeRef.UnitType -> null to "deferred.await()"
             this is KmpTypeRef.Primitive -> when (kind) {
-                PrimitiveKind.STRING  -> "deferred.await() as$q String"
-                PrimitiveKind.BOOLEAN -> "deferred.await() as$q Boolean"
-                PrimitiveKind.INT     -> "(deferred.await() as Double)$q.toInt()"
-                PrimitiveKind.LONG    -> "(deferred.await() as Double)$q.toLong()"
-                PrimitiveKind.DOUBLE  -> "deferred.await() as$q Double"
-                PrimitiveKind.FLOAT   -> "(deferred.await() as Double)$q.toFloat()"
-                PrimitiveKind.BYTE    -> "(deferred.await() as Double)$q.toInt().toByte()"
-                PrimitiveKind.SHORT   -> "(deferred.await() as Double)$q.toInt().toShort()"
-                PrimitiveKind.CHAR    -> "(deferred.await() as String)$q.first()"
+                PrimitiveKind.STRING  -> "String$q"  to cast("String")
+                PrimitiveKind.BOOLEAN -> "Boolean$q" to cast("Boolean")
+                PrimitiveKind.INT     -> "Int$q"     to cast("Int")
+                PrimitiveKind.LONG    -> "Double$q"  to cast("Double", ".toLong()")
+                PrimitiveKind.DOUBLE  -> "Double$q"  to cast("Double")
+                PrimitiveKind.FLOAT   -> "Float$q"   to cast("Float")
+                PrimitiveKind.BYTE    -> "Int$q"     to cast("Int", ".toByte()")
+                PrimitiveKind.SHORT   -> "Int$q"     to cast("Int", ".toShort()")
+                PrimitiveKind.CHAR    ->
+                    if (isNullable) "String?" to "(deferred.await() as? String)?.firstOrNull()"
+                    else "String" to "(deferred.await() as String).first()"
             }
             this is KmpTypeRef.ClassRef && simpleName in enumNames ->
-                "${simpleName}.valueOf(deferred.await() as String)"
-            this is KmpTypeRef.ClassRef && simpleName in dataClassNames ->
-                if (nullable) "(deferred.await() as? ${simpleName}Record)?.toKmp()"
-                else "(deferred.await() as ${simpleName}Record).toKmp()"
-            this is KmpTypeRef.ClassRef && simpleName in sealedNames ->
-                if (nullable) "(deferred.await() as? ${simpleName}Record)?.toKmp()"
-                else "(deferred.await() as ${simpleName}Record).toKmp()"
-            else -> "deferred.await()"
+                if (isNullable) "String?" to "(deferred.await() as? String)?.let { ${simpleName}.valueOf(it) }"
+                else "String" to "${simpleName}.valueOf(deferred.await() as String)"
+            this is KmpTypeRef.ClassRef && (simpleName in dataClassNames || simpleName in sealedNames) ->
+                "${simpleName}Record$q" to cast("${simpleName}Record", ".toKmp()")
+            else -> "Any?" to "deferred.await()"
         }
-    }
-
-    /**
-     * The Kotlin parameter type for the `result` parameter of a JS-implemented interface's
-     * `resolve<Fn>` bridge function — i.e. the wire type JS must supply when resolving a pending
-     * suspend call.
-     *
-     * @return `null` for [KmpTypeRef.UnitType], since a `resolve<Fn>` for a `Unit`-returning
-     *         function takes no result parameter at all.
-     */
-    private fun KmpTypeRef.toResolveParamType(
-        enumNames: Set<String>,
-        dataClassNames: Set<String>,
-        sealedNames: Set<String>,
-    ): String? = when {
-        this is KmpTypeRef.UnitType -> null
-        this is KmpTypeRef.Primitive -> {
-            val q = if (nullable) "?" else ""
-            when (kind) {
-                PrimitiveKind.STRING  -> "String$q"
-                PrimitiveKind.BOOLEAN -> "Boolean$q"
-                PrimitiveKind.INT     -> "Int$q"
-                PrimitiveKind.LONG    -> "Double$q"
-                PrimitiveKind.DOUBLE  -> "Double$q"
-                PrimitiveKind.FLOAT   -> "Float$q"
-                PrimitiveKind.BYTE    -> "Int$q"
-                PrimitiveKind.SHORT   -> "Int$q"
-                PrimitiveKind.CHAR    -> "String$q"
-            }
-        }
-        this is KmpTypeRef.ClassRef && simpleName in enumNames ->
-            if (nullable) "String?" else "String"
-        this is KmpTypeRef.ClassRef && simpleName in dataClassNames ->
-            if (nullable) "${simpleName}Record?" else "${simpleName}Record"
-        this is KmpTypeRef.ClassRef && simpleName in sealedNames ->
-            if (nullable) "${simpleName}Record?" else "${simpleName}Record"
-        else -> "Any?"
     }
 
     // ── Enum reference detection ──────────────────────────────────────────────

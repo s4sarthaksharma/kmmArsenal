@@ -74,6 +74,7 @@ sealed class FixtureAuthState {
 interface FixtureRepository {
     fun findById(id: String): FixtureUser                   // SYNC, ClassRef return
     suspend fun fetchById(id: String): FixtureUser           // SUSPEND, ClassRef return
+    suspend fun countAll(): Int                              // SUSPEND, numeric return (resolve wire contract)
     fun observeAll(): Flow<List<FixtureUser>>                // FLOW, nested Collection+ClassRef
 }
 
@@ -372,6 +373,7 @@ class FixtureInterfaceApi {
             tags = listOf("repo"), metadata = mapOf("version" to 1), aliases = emptySet(),
         )
         override suspend fun fetchById(id: String): FixtureUser = findById(id)
+        override suspend fun countAll(): Int = 42
         override fun observeAll(): Flow<List<FixtureUser>> = flow { emit(listOf(findById("all"))) }
     }
 
