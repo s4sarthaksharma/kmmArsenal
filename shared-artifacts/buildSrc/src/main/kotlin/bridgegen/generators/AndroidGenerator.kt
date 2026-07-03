@@ -37,9 +37,14 @@ object AndroidGenerator {
                     onSkip("OBJECT SKIPPED: ${decl.name} — no functions to bridge.")
                     false
                 }
-                decl is KmpDeclaration.KmpClass  -> true
-                decl is KmpDeclaration.KmpObject -> true
-                else                             -> false
+                decl is KmpDeclaration.KmpFileScope && decl.functions.isEmpty() -> {
+                    onSkip("FILE SCOPE SKIPPED: ${decl.fileName} — no functions to bridge.")
+                    false
+                }
+                decl is KmpDeclaration.KmpClass     -> true
+                decl is KmpDeclaration.KmpObject    -> true
+                decl is KmpDeclaration.KmpFileScope -> true
+                else                                -> false
             }
         }
 
@@ -73,8 +78,10 @@ object AndroidGenerator {
             sealedBodies.add(body)
         }
 
+        val takenNames = modules.filter { it !is KmpDeclaration.KmpFileScope }.map { it.declName() }.toSet()
         for (decl in modules) {
-            val (imports, body) = buildModuleBody(decl, module, kmpPackageName, enumNames, dataClassNames, sealedNames, onSkip)
+            val nameOverride = if (decl is KmpDeclaration.KmpFileScope && decl.fileName in takenNames) "${decl.fileName}Kt" else null
+            val (imports, body) = buildModuleBody(decl, module, kmpPackageName, enumNames, dataClassNames, sealedNames, onSkip, moduleNameOverride = nameOverride)
             allImports.addAll(imports)
             moduleBodies.add(body)
         }
@@ -255,20 +262,28 @@ object AndroidGenerator {
         dataClassNames: Set<String>,
         sealedNames: Set<String>,
         onSkip: (String) -> Unit = {},
+        moduleNameOverride: String? = null,
     ): Pair<Set<String>, String> {
-        val name      = decl.declName()
-        val functions = decl.declFunctions()
-        val isObject  = decl is KmpDeclaration.KmpObject
+        val name        = moduleNameOverride ?: decl.declName()
+        val functions   = decl.declFunctions()
+        val isObject    = decl is KmpDeclaration.KmpObject
+        val isFileScope = decl is KmpDeclaration.KmpFileScope
+        val isInstanceBased = !isObject && !isFileScope
 
         val flows      = functions.filter { it.kind == FunctionKind.FLOW }
         val hasSuspend = functions.any { it.kind == FunctionKind.SUSPEND }
         val hasFlows   = flows.isNotEmpty()
         val eventNames = flows.map { "on${it.flowBaseName.cap()}Update" }
         val usedEnums  = enumNames.filter { eName -> functions.any { fn -> fn.referencesEnum(eName) } }
-        val callTarget = if (isObject) name else name.decap()
+        // callTarget: object → type name (singleton), file scope → package name (FQN call), class → unused (uses instance map)
+        val callTarget = when {
+            isObject    -> name
+            isFileScope -> kmpPackageName
+            else        -> name.decap()
+        }
 
         val imports = mutableSetOf<String>()
-        imports.add("$kmpPackageName.$name")
+        if (!isFileScope) imports.add("$kmpPackageName.$name")
         for (eName in usedEnums) imports.add("$kmpPackageName.$eName")
         if (hasSuspend) imports.add("expo.modules.kotlin.Promise")
         imports.add("expo.modules.kotlin.modules.Module")
@@ -282,26 +297,67 @@ object AndroidGenerator {
             imports.add("kotlinx.coroutines.launch")
         }
         if (hasFlows) imports.add("kotlinx.coroutines.flow.collect")
+        if (isInstanceBased) {
+            imports.add("java.util.UUID")
+            imports.add("java.util.concurrent.ConcurrentHashMap")
+        }
 
         val typeArgsSuffix = if (decl is KmpDeclaration.KmpClass && decl.typeParameters.isNotEmpty()) {
             "<${decl.typeParameters.joinToString(", ") { "Any" }}>"
         } else ""
 
+        // Instance-based classes with async work use a per-instance holder so that destroy()
+        // can cancel the scope in one call and the two maps (instances + flowJobs) collapse into one.
+        val useHolder = isInstanceBased && (hasSuspend || hasFlows)
+
         val sb = StringBuilder()
         sb.appendLine("class ${name}Module : Module() {")
-        if (!isObject) sb.appendLine("  private val $callTarget = $name$typeArgsSuffix()")
-        if (hasSuspend || hasFlows) {
-            sb.appendLine("  private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())")
-        }
-        if (hasFlows) {
-            val enumCases = flows.joinToString(", ") { it.flowBaseName.toSnakeUpperCase() }
-            sb.appendLine("  private enum class FlowKey { $enumCases }")
-            sb.appendLine("  private val flowJobs = mutableMapOf<FlowKey, Job>()")
+        if (useHolder) {
+            if (hasFlows) {
+                val enumCases = flows.joinToString(", ") { it.flowBaseName.toSnakeUpperCase() }
+                sb.appendLine("  private enum class FlowKey { $enumCases }")
+            }
+            sb.appendLine("  private class InstanceHolder(val instance: $name$typeArgsSuffix) {")
+            sb.appendLine("    val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())")
+            if (hasFlows) sb.appendLine("    val flowJobs = mutableMapOf<FlowKey, Job>()")
+            sb.appendLine("  }")
+            sb.appendLine("  private val instances = ConcurrentHashMap<String, InstanceHolder>()")
+        } else {
+            if (isInstanceBased) sb.appendLine("  private val instances = ConcurrentHashMap<String, $name$typeArgsSuffix>()")
+            if (hasSuspend || hasFlows) {
+                sb.appendLine("  private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())")
+            }
+            if (hasFlows) {
+                val enumCases = flows.joinToString(", ") { it.flowBaseName.toSnakeUpperCase() }
+                sb.appendLine("  private enum class FlowKey { $enumCases }")
+                sb.appendLine("  private val flowJobs = mutableMapOf<FlowKey, Job>()")
+            }
         }
 
         sb.appendLine()
         sb.appendLine("  override fun definition() = ModuleDefinition {")
         sb.appendLine("""    Name("$name")""")
+
+        if (isInstanceBased) {
+            sb.appendLine()
+            sb.appendLine("""    Function("create") {""")
+            sb.appendLine("      val id = UUID.randomUUID().toString()")
+            if (useHolder) {
+                sb.appendLine("      instances[id] = InstanceHolder($name$typeArgsSuffix())")
+            } else {
+                sb.appendLine("      instances[id] = $name$typeArgsSuffix()")
+            }
+            sb.appendLine("      id")
+            sb.appendLine("    }")
+            sb.appendLine()
+            sb.appendLine("""    Function("destroy") { instanceId: String ->""")
+            if (useHolder) {
+                sb.appendLine("      instances.remove(instanceId)?.scope?.cancel()")
+            } else {
+                sb.appendLine("      instances.remove(instanceId)")
+            }
+            sb.appendLine("    }")
+        }
 
         if (eventNames.isNotEmpty()) {
             sb.appendLine()
@@ -311,16 +367,20 @@ object AndroidGenerator {
         if (hasSuspend || hasFlows) {
             sb.appendLine()
             sb.appendLine("    OnDestroy {")
-            sb.appendLine("      scope.cancel()")
+            if (useHolder) {
+                sb.appendLine("      instances.values.forEach { it.scope.cancel() }")
+            } else {
+                sb.appendLine("      scope.cancel()")
+            }
             sb.appendLine("    }")
         }
 
         for (fn in functions) {
             sb.appendLine()
             when (fn.kind) {
-                FunctionKind.SYNC    -> sb.append(syncFunction(fn, callTarget, enumNames, dataClassNames, sealedNames, onSkip))
-                FunctionKind.SUSPEND -> sb.append(suspendFunction(fn, callTarget, enumNames, dataClassNames, sealedNames, onSkip))
-                FunctionKind.FLOW    -> sb.append(flowFunctions(fn, callTarget, enumNames, dataClassNames, sealedNames))
+                FunctionKind.SYNC    -> sb.append(syncFunction(fn, callTarget, enumNames, dataClassNames, sealedNames, onSkip, isInstanceBased = isInstanceBased, useHolder = useHolder))
+                FunctionKind.SUSPEND -> sb.append(suspendFunction(fn, callTarget, enumNames, dataClassNames, sealedNames, onSkip, isInstanceBased = isInstanceBased, useHolder = useHolder))
+                FunctionKind.FLOW    -> sb.append(flowFunctions(fn, callTarget, enumNames, dataClassNames, sealedNames, useHolder = useHolder))
             }
         }
 
@@ -339,23 +399,38 @@ object AndroidGenerator {
         dataClassNames: Set<String> = emptySet(),
         sealedNames: Set<String> = emptySet(),
         onSkip: (String) -> Unit = {},
+        isInstanceBased: Boolean = false,
+        useHolder: Boolean = false,
     ): String {
-        if (fn.params.size > MAX_EXPO_FUNCTION_PARAMS) {
+        val effectiveParamCount = fn.params.size + if (isInstanceBased) 1 else 0
+        if (effectiveParamCount > MAX_EXPO_FUNCTION_PARAMS) {
             val msg = "BRIDGE SKIPPED: ${fn.name}(${fn.params.size} params) — Expo Function DSL supports max $MAX_EXPO_FUNCTION_PARAMS parameters."
             onSkip(msg)
             return "    // $msg\n"
         }
         val sb  = StringBuilder()
         val ret = fn.returnType.toReturnSuffix(enumNames, dataClassNames, sealedNames)
+        val instanceExpr = when {
+            useHolder      -> "(instances[instanceId] ?: error(\"Instance not found: \$instanceId\")).instance"
+            isInstanceBased -> "(instances[instanceId] ?: error(\"Instance not found: \$instanceId\"))"
+            else            -> callTarget
+        }
+        val ownParams = fn.params.joinToString(", ") { "${it.name}: ${it.type.toBridgeParamType(enumNames)}" }
+        val callArgs  = fn.params.joinToString(", ") { it.type.toCallArg(it.name, enumNames) }
         sb.append(formatComment(fn.docComment))
-        if (fn.params.isEmpty()) {
+        if (!isInstanceBased && fn.params.isEmpty()) {
             sb.appendLine("""    Function("${fn.name}") {""")
-            sb.appendLine("      $callTarget.${fn.name}()$ret")
+            if (fn.isPropertyGetter) {
+                sb.appendLine("      $instanceExpr.${fn.name}")
+            } else {
+                sb.appendLine("      $instanceExpr.${fn.name}()$ret")
+            }
         } else {
-            val paramList = fn.params.joinToString(", ") { "${it.name}: ${it.type.toBridgeParamType(enumNames)}" }
-            val callArgs  = fn.params.joinToString(", ") { it.type.toCallArg(it.name, enumNames) }
+            val paramList = if (isInstanceBased)
+                if (ownParams.isEmpty()) "instanceId: String" else "instanceId: String, $ownParams"
+            else ownParams
             sb.appendLine("""    Function("${fn.name}") { $paramList ->""")
-            sb.appendLine("      $callTarget.${fn.name}($callArgs)$ret")
+            sb.appendLine("      $instanceExpr.${fn.name}($callArgs)$ret")
         }
         sb.appendLine("    }")
         return sb.toString()
@@ -368,8 +443,11 @@ object AndroidGenerator {
         dataClassNames: Set<String> = emptySet(),
         sealedNames: Set<String> = emptySet(),
         onSkip: (String) -> Unit = {},
+        isInstanceBased: Boolean = false,
+        useHolder: Boolean = false,
     ): String {
-        if (fn.params.size > MAX_EXPO_FUNCTION_PARAMS) {
+        val effectiveParamCount = fn.params.size + if (isInstanceBased) 1 else 0
+        if (effectiveParamCount > MAX_EXPO_FUNCTION_PARAMS) {
             val msg = "BRIDGE SKIPPED: ${fn.name}(${fn.params.size} params) — Expo AsyncFunction DSL supports max $MAX_EXPO_FUNCTION_PARAMS parameters."
             onSkip(msg)
             return "    // $msg\n"
@@ -377,15 +455,24 @@ object AndroidGenerator {
         val sb       = StringBuilder()
         val errorTag = "${fn.name.toSnakeUpperCase()}_ERROR"
         val ret      = fn.returnType.toReturnSuffix(enumNames, dataClassNames, sealedNames)
-        val paramList = (fn.params.map { "${it.name}: ${it.type.toBridgeParamType(enumNames)}" }
-                + listOf("promise: Promise")).joinToString(", ")
-        val callArgs = fn.params.joinToString(", ") { it.type.toCallArg(it.name, enumNames) }
+        val ownParams = fn.params.map { "${it.name}: ${it.type.toBridgeParamType(enumNames)}" }
+        val allParams = (if (isInstanceBased) listOf("instanceId: String") else emptyList()) + ownParams + listOf("promise: Promise")
+        val paramList = allParams.joinToString(", ")
+        val callArgs  = fn.params.joinToString(", ") { it.type.toCallArg(it.name, enumNames) }
 
         sb.append(formatComment(fn.docComment))
         sb.appendLine("""    AsyncFunction("${fn.name}") { $paramList ->""")
-        sb.appendLine("      scope.launch {")
-        sb.appendLine("        try {")
-        sb.appendLine("          promise.resolve($callTarget.${fn.name}($callArgs)$ret)")
+        if (useHolder) {
+            sb.appendLine("      val holder = instances[instanceId] ?: error(\"Instance not found: \$instanceId\")")
+            sb.appendLine("      holder.scope.launch {")
+            sb.appendLine("        try {")
+            sb.appendLine("          promise.resolve(holder.instance.${fn.name}($callArgs)$ret)")
+        } else {
+            sb.appendLine("      scope.launch {")
+            sb.appendLine("        try {")
+            val instanceExpr = if (isInstanceBased) "(instances[instanceId] ?: error(\"Instance not found: \$instanceId\"))" else callTarget
+            sb.appendLine("          promise.resolve($instanceExpr.${fn.name}($callArgs)$ret)")
+        }
         sb.appendLine("        } catch (e: Exception) {")
         sb.appendLine("""          promise.reject("$errorTag", e.message, e)""")
         sb.appendLine("        }")
@@ -400,6 +487,7 @@ object AndroidGenerator {
         enumNames: Set<String>,
         dataClassNames: Set<String> = emptySet(),
         sealedNames: Set<String> = emptySet(),
+        useHolder: Boolean = false,
     ): String {
         val sb        = StringBuilder()
         val base      = fn.flowBaseName
@@ -416,19 +504,37 @@ object AndroidGenerator {
         }
 
         sb.append(formatComment(fn.docComment))
-        sb.appendLine("""    Function("start$Cap") {""")
-        sb.appendLine("      flowJobs[$enumKey]?.cancel()")
-        sb.appendLine("      flowJobs[$enumKey] = scope.launch {")
-        sb.appendLine("        $callTarget.${fn.name}().collect { value ->")
-        sb.appendLine("""          sendEvent("$eventName", mapOf("value" to $emit))""")
-        sb.appendLine("        }")
-        sb.appendLine("      }")
-        sb.appendLine("    }")
-        sb.appendLine()
-        sb.appendLine("""    Function("stop$Cap") {""")
-        sb.appendLine("      flowJobs[$enumKey]?.cancel()")
-        sb.appendLine("      flowJobs.remove($enumKey)")
-        sb.appendLine("    }")
+        if (useHolder) {
+            sb.appendLine("""    Function("start$Cap") { instanceId: String ->""")
+            sb.appendLine("      val holder = instances[instanceId] ?: error(\"Instance not found: \$instanceId\")")
+            sb.appendLine("      holder.flowJobs[$enumKey]?.cancel()")
+            sb.appendLine("      holder.flowJobs[$enumKey] = holder.scope.launch {")
+            sb.appendLine("        holder.instance.${fn.name}().collect { value ->")
+            sb.appendLine("""          sendEvent("$eventName", mapOf("instanceId" to instanceId, "value" to $emit))""")
+            sb.appendLine("        }")
+            sb.appendLine("      }")
+            sb.appendLine("    }")
+            sb.appendLine()
+            sb.appendLine("""    Function("stop$Cap") { instanceId: String ->""")
+            sb.appendLine("      val holder = instances[instanceId] ?: return@Function")
+            sb.appendLine("      holder.flowJobs[$enumKey]?.cancel()")
+            sb.appendLine("      holder.flowJobs.remove($enumKey)")
+            sb.appendLine("    }")
+        } else {
+            sb.appendLine("""    Function("start$Cap") {""")
+            sb.appendLine("      flowJobs[$enumKey]?.cancel()")
+            sb.appendLine("      flowJobs[$enumKey] = scope.launch {")
+            sb.appendLine("        $callTarget.${fn.name}().collect { value ->")
+            sb.appendLine("""          sendEvent("$eventName", mapOf("value" to $emit))""")
+            sb.appendLine("        }")
+            sb.appendLine("      }")
+            sb.appendLine("    }")
+            sb.appendLine()
+            sb.appendLine("""    Function("stop$Cap") {""")
+            sb.appendLine("      flowJobs[$enumKey]?.cancel()")
+            sb.appendLine("      flowJobs.remove($enumKey)")
+            sb.appendLine("    }")
+        }
         return sb.toString()
     }
 
@@ -732,6 +838,7 @@ object AndroidGenerator {
         is KmpDeclaration.KmpInterface   -> name
         is KmpDeclaration.KmpSealedClass -> name
         is KmpDeclaration.KmpEnum        -> name
+        is KmpDeclaration.KmpFileScope   -> fileName
     }
 
     private fun KmpDeclaration.declFunctions(): List<KmpFunction> = when (this) {
@@ -741,6 +848,7 @@ object AndroidGenerator {
         is KmpDeclaration.KmpInterface   -> functions
         is KmpDeclaration.KmpSealedClass -> functions
         is KmpDeclaration.KmpEnum        -> emptyList()
+        is KmpDeclaration.KmpFileScope   -> functions
     }
 
     // ── Bridge param / call arg ───────────────────────────────────────────────

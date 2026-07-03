@@ -23,6 +23,11 @@ object TsBridgeGenerator {
                 if (obj.functions.isEmpty()) { onSkip("OBJECT SKIPPED: ${obj.name} — no functions to bridge."); false }
                 else true
             }
+        val filescopes = sourceFile.declarations.filterIsInstance<KmpDeclaration.KmpFileScope>()
+            .filter { scope ->
+                if (scope.functions.isEmpty()) { onSkip("FILE SCOPE SKIPPED: ${scope.fileName} — no functions to bridge."); false }
+                else true
+            }
         sourceFile.declarations.filterIsInstance<KmpDeclaration.KmpInterface>()
             .forEach { onSkip("CLASS SKIPPED: ${it.name} — interfaces are not bridged.") }
         for (dc in datas) {
@@ -36,7 +41,7 @@ object TsBridgeGenerator {
             }
         }
 
-        val hasBridgeable = classes.isNotEmpty() || objects.isNotEmpty()
+        val hasBridgeable = classes.isNotEmpty() || objects.isNotEmpty() || filescopes.isNotEmpty()
         if (enums.isEmpty() && datas.isEmpty() && sealeds.isEmpty() && !hasBridgeable) return ""
 
         val enumNames   = module.declarations.filterIsInstance<KmpDeclaration.KmpEnum>().map { it.name }.toSet()
@@ -50,6 +55,7 @@ object TsBridgeGenerator {
                 appendLine()
                 appendLine("import { requireNativeModule } from 'expo-modules-core';")
             }
+
 
             // 1. Enums
             for (e in enums) {
@@ -97,27 +103,53 @@ object TsBridgeGenerator {
 
             if (!hasBridgeable) return@buildString
 
-            // 4. requireNativeModule instances (one per bridgeable class / object)
+            // 4. requireNativeModule instances (one per bridgeable class / object / file scope)
+            val takenNames = (classes.map { it.name } + objects.map { it.name }).toSet()
+            fun scopeName(scope: KmpDeclaration.KmpFileScope) =
+                if (scope.fileName in takenNames) "${scope.fileName}Kt" else scope.fileName
+
             appendLine()
             appendLine("// ── Native module instances ───────────────────────────────────────────────────")
             appendLine()
             for (cls in classes) appendLine("const _${cls.name} = requireNativeModule('${cls.name}');")
             for (obj in objects) appendLine("const _${obj.name} = requireNativeModule('${obj.name}');")
+            for (scope in filescopes) appendLine("const _${scopeName(scope)} = requireNativeModule('${scopeName(scope)}');")
 
-            // 5. Exported wrapper const objects
+            // 5. Classes — instance handle wrapper (TS class with private handle)
             for (cls in classes) {
                 appendLine()
-                appendLine("export const ${cls.name} = {")
+                appendLine("export class ${cls.name} {")
+                appendLine("  private constructor(private readonly _handle: string) {}")
+                appendLine()
+                appendLine("  static create(): ${cls.name} {")
+                appendLine("    return new ${cls.name}(_${cls.name}.create())")
+                appendLine("  }")
+                appendLine()
+                appendLine("  destroy(): void { _${cls.name}.destroy(this._handle) }")
                 for (fn in cls.functions) {
-                    appendWrapperFunction(fn, cls.name, enumNames, dataNames, sealedNames, onSkip)
+                    appendLine()
+                    appendInstanceWrapperFunction(fn, cls.name, enumNames, dataNames, sealedNames, onSkip)
                 }
-                appendLine("};")
+                appendLine("}")
             }
+
+            // 6. Objects — flat const wrapper (unchanged singleton pattern)
             for (obj in objects) {
                 appendLine()
                 appendLine("export const ${obj.name} = {")
                 for (fn in obj.functions) {
                     appendWrapperFunction(fn, obj.name, enumNames, dataNames, sealedNames, onSkip)
+                }
+                appendLine("};")
+            }
+
+            // 7. File scopes — flat const wrapper (same pattern as objects)
+            for (scope in filescopes) {
+                val sName = scopeName(scope)
+                appendLine()
+                appendLine("export const $sName = {")
+                for (fn in scope.functions) {
+                    appendWrapperFunction(fn, sName, enumNames, dataNames, sealedNames, onSkip)
                 }
                 appendLine("};")
             }
@@ -166,6 +198,56 @@ object TsBridgeGenerator {
                 appendLine("  stop$cap: (): void => $native.stop$cap(),")
                 appendLine("  add${cap}Listener: (handler: (event: { value: $valueType }) => void) =>")
                 appendLine("    $native.addListener('on${cap}Update', handler),")
+            }
+        }
+    }
+
+    private fun StringBuilder.appendInstanceWrapperFunction(
+        fn: KmpFunction,
+        moduleName: String,
+        enumNames: Set<String>,
+        dataNames: Set<String>,
+        sealedNames: Set<String>,
+        onSkip: (String) -> Unit = {},
+    ) {
+        val native = "_$moduleName"
+        when (fn.kind) {
+            FunctionKind.SYNC -> {
+                if (fn.params.size + 1 > MAX_EXPO_FUNCTION_PARAMS) {
+                    onSkip("FUNCTION SKIPPED: $moduleName.${fn.name}() — too many params (${fn.params.size} + handle > $MAX_EXPO_FUNCTION_PARAMS).")
+                    return
+                }
+                val params = fn.params.joinToString(", ") {
+                    "${it.name}: ${it.type.toTsType(enumNames, dataNames, sealedNames, wrapperMode = true)}"
+                }
+                val ret  = fn.returnType.toTsType(enumNames, dataNames, sealedNames, wrapperMode = true)
+                val args = (listOf("this._handle") + fn.params.map { it.name }).joinToString(", ")
+                appendLine("  ${fn.name}($params): $ret { return $native.${fn.name}($args) }")
+            }
+            FunctionKind.SUSPEND -> {
+                if (fn.params.size + 1 > MAX_EXPO_FUNCTION_PARAMS) {
+                    onSkip("FUNCTION SKIPPED: $moduleName.${fn.name}() — too many params (${fn.params.size} + handle > $MAX_EXPO_FUNCTION_PARAMS).")
+                    return
+                }
+                val params = fn.params.joinToString(", ") {
+                    "${it.name}: ${it.type.toTsType(enumNames, dataNames, sealedNames, wrapperMode = true)}"
+                }
+                val ret  = fn.returnType.toTsType(enumNames, dataNames, sealedNames, wrapperMode = true)
+                val args = (listOf("this._handle") + fn.params.map { it.name }).joinToString(", ")
+                appendLine("  ${fn.name}($params): Promise<$ret> { return $native.${fn.name}($args) }")
+            }
+            FunctionKind.FLOW -> {
+                val base = fn.flowBaseName
+                val cap  = base.replaceFirstChar { it.uppercase() }
+                val valueType = fn.returnType.toTsType(enumNames, dataNames, sealedNames, wrapperMode = true)
+                appendLine()
+                appendLine("  start$cap(): void { $native.start$cap(this._handle) }")
+                appendLine("  stop$cap(): void { $native.stop$cap(this._handle) }")
+                appendLine("  add${cap}Listener(handler: (event: { value: $valueType }) => void) {")
+                appendLine("    return $native.addListener('on${cap}Update', (e: any) => {")
+                appendLine("      if (e.instanceId === this._handle) handler({ value: e.value })")
+                appendLine("    })")
+                appendLine("  }")
             }
         }
     }

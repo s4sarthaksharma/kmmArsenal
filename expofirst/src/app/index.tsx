@@ -11,11 +11,12 @@ import {
   View,
 } from "react-native";
 import { Calculator } from "kmp-bridge/src/Calculator";
-import { Greeting } from "kmp-bridge/src/Greeting";
+import { Greeting, GreetingKt } from "kmp-bridge/src/Greeting";
 import { AsyncWorker } from "kmp-bridge/src/AsyncWorker";
 import { TickerService } from "kmp-bridge/src/TickerService";
 import { TrafficLight, LightColor } from "kmp-bridge/src/TrafficLight";
 import {
+  BridgeTypeFixture,
   FixtureAsyncApi,
   FixtureAnalytics,
   FixturePrimitivesApi,
@@ -122,28 +123,38 @@ function GreetingTab() {
   const [echoIn, setEchoIn]         = useState("");
   const [echoResult, setEchoResult] = useState<string | null>(null);
   const [echoPending, setEchoPending] = useState(false);
-  const subRef = useRef<ReturnType<typeof Greeting.addCounterListener> | null>(null);
+  const gRef   = useRef<Greeting | null>(null);
+  const subRef = useRef<ReturnType<Greeting["addCounterListener"]> | null>(null);
 
-  useEffect(() => () => {
-    Greeting.stopCounter();
-    subRef.current?.remove();
+  useEffect(() => {
+    gRef.current = Greeting.create();
+    return () => {
+      gRef.current?.stopCounter();
+      subRef.current?.remove();
+      gRef.current?.destroy();
+      gRef.current = null;
+    };
   }, []);
 
   const toggleCounter = () => {
+    const g = gRef.current;
+    if (!g) return;
     if (counting) {
-      Greeting.stopCounter();
+      g.stopCounter();
       subRef.current?.remove();
       setCounting(false);
     } else {
-      Greeting.startCounter();
-      subRef.current = Greeting.addCounterListener(e => setCount(e.value));
+      g.startCounter();
+      subRef.current = g.addCounterListener(e => setCount(e.value));
       setCounting(true);
     }
   };
 
   const sendEcho = async () => {
+    const g = gRef.current;
+    if (!g) return;
     setEchoPending(true);
-    try { setEchoResult(await Greeting.delayedEcho(echoIn, 2000)); }
+    try { setEchoResult(await g.delayedEcho(echoIn, 2000)); }
     finally { setEchoPending(false); }
   };
 
@@ -152,15 +163,15 @@ function GreetingTab() {
 
       <FnCard name="greet(name): String">
         <StrIn value={name} onChange={setName} placeholder="name" />
-        <Btn label="Call" onPress={() => setGreet(Greeting.greet(name))} />
+        <Btn label="Call" onPress={() => setGreet(gRef.current?.greet(name) ?? "")} />
         {greetResult != null && <ReplyRow value={greetResult} />}
       </FnCard>
 
       <FnCard name="greeting2 / 3 / 4(): String">
         <Row2>
-          <Btn label="greeting2()" onPress={() => setG2(Greeting.greeting2())} />
-          <Btn label="greeting3()" onPress={() => setG3(Greeting.greeting3())} />
-          <Btn label="greeting4()" onPress={() => setG4(Greeting.greeting4())} />
+          <Btn label="greeting2()" onPress={() => setG2(gRef.current?.greeting2() ?? "")} />
+          <Btn label="greeting3()" onPress={() => setG3(gRef.current?.greeting3() ?? "")} />
+          <Btn label="greeting4()" onPress={() => setG4(gRef.current?.greeting4() ?? "")} />
         </Row2>
         {g2 != null && <ReplyRow value={`g2 → ${g2}`} />}
         {g3 != null && <ReplyRow value={`g3 → ${g3}`} />}
@@ -180,6 +191,14 @@ function GreetingTab() {
         {echoResult != null && <ReplyRow value={echoResult} />}
       </FnCard>
 
+      {/* ── GreetingKt (file-scope) ────────────────────────── */}
+      <Text style={s.section}>GreetingKt (file-scope)</Text>
+
+      <FnCard name="saidHello(): String">
+        <Btn label="Call" onPress={() => setGreet(GreetingKt.saidHello())} />
+        {greetResult != null && <ReplyRow value={greetResult} />}
+      </FnCard>
+
     </ScrollView>
   );
 }
@@ -191,8 +210,15 @@ function CalculatorTab() {
   const [b, setB]       = useState("7");
   const [lbl, setLbl]   = useState("apples");
   const [neg, setNeg]   = useState(true);
+  const [calc, setCalc] = useState<Calculator | null>(null);
   const na = Number(a) || 0;
   const nb = Number(b) || 0;
+
+  useEffect(() => {
+    const c = Calculator.create();
+    setCalc(c);
+    return () => { c.destroy(); setCalc(null); };
+  }, []);
 
   return (
     <ScrollView contentContainerStyle={s.tab} keyboardShouldPersistTaps="handled">
@@ -206,19 +232,19 @@ function CalculatorTab() {
       </View>
 
       <FnCard name="addInts(a, b): Int">
-        <ReplyRow value={Calculator.addInts(na, nb)} />
+        <ReplyRow value={calc?.addInts(na, nb) ?? 0} />
       </FnCard>
 
       <FnCard name="addDoubles(a, b): Double">
-        <ReplyRow value={Calculator.addDoubles(na, nb)} />
+        <ReplyRow value={calc?.addDoubles(na, nb) ?? 0} />
       </FnCard>
 
       <FnCard name="addLongs(a, b): Long">
-        <ReplyRow value={Calculator.addLongs(na, nb)} />
+        <ReplyRow value={calc?.addLongs(na, nb) ?? 0} />
       </FnCard>
 
       <FnCard name="multiplyFloats(a, b): Float">
-        <ReplyRow value={Calculator.multiplyFloats(na, nb)} />
+        <ReplyRow value={calc?.multiplyFloats(na, nb) ?? 0} />
       </FnCard>
 
       <FnCard name="negate(value): Boolean">
@@ -231,16 +257,16 @@ function CalculatorTab() {
             trackColor={{ true: C.accentDim, false: C.surface2 }}
           />
         </View>
-        <ReplyRow value={Calculator.negate(neg)} />
+        <ReplyRow value={calc?.negate(neg) ?? false} />
       </FnCard>
 
       <FnCard name="describe(label, count): String">
         <StrIn value={lbl} onChange={setLbl} placeholder="label" />
-        <ReplyRow value={Calculator.describe(lbl, na)} />
+        <ReplyRow value={calc?.describe(lbl, na) ?? ""} />
       </FnCard>
 
       <FnCard name="reset(): Unit">
-        <Btn label="reset()" onPress={() => Calculator.reset()} />
+        <Btn label="reset()" onPress={() => calc?.reset()} />
         <Text style={s.hint}>Returns Unit — bridge exercises the void path</Text>
       </FnCard>
 
@@ -260,6 +286,12 @@ function AsyncWorkerTab() {
   const [delayMs, setDelayMs] = useState("1500");
   const [flag, setFlag]       = useState<string | null>(null);
   const [flagPending, setFlagP] = useState(false);
+  const awRef = useRef<AsyncWorker | null>(null);
+
+  useEffect(() => {
+    awRef.current = AsyncWorker.create();
+    return () => { awRef.current?.destroy(); awRef.current = null; };
+  }, []);
 
   return (
     <ScrollView contentContainerStyle={s.tab} keyboardShouldPersistTaps="handled">
@@ -267,7 +299,7 @@ function AsyncWorkerTab() {
       <FnCard name="fetchMessage(): suspend String">
         <Btn label={msgPending ? "Fetching…" : "Call"} disabled={msgPending} onPress={async () => {
           setMsgP(true);
-          try { setMsg(await AsyncWorker.fetchMessage()); } finally { setMsgP(false); }
+          try { setMsg(await awRef.current?.fetchMessage() ?? ""); } finally { setMsgP(false); }
         }} />
         {msg != null && <ReplyRow value={msg} />}
       </FnCard>
@@ -279,7 +311,7 @@ function AsyncWorkerTab() {
         </Row2>
         <Btn label={sumPending ? "Computing…" : "Call"} disabled={sumPending} onPress={async () => {
           setSumP(true);
-          try { setSum(String(await AsyncWorker.computeSum(Number(sa) || 0, Number(sb) || 0))); }
+          try { setSum(String(await awRef.current?.computeSum(Number(sa) || 0, Number(sb) || 0) ?? 0)); }
           finally { setSumP(false); }
         }} />
         {sum != null && <ReplyRow value={sum} />}
@@ -289,7 +321,7 @@ function AsyncWorkerTab() {
         <NumIn value={delayMs} onChange={setDelayMs} placeholder="delay ms" />
         <Btn label={flagPending ? `Waiting ${delayMs} ms…` : "Call"} disabled={flagPending} onPress={async () => {
           setFlagP(true);
-          try { setFlag(String(await AsyncWorker.waitAndFlag(Number(delayMs) || 1000))); }
+          try { setFlag(String(await awRef.current?.waitAndFlag(Number(delayMs) || 1000) ?? false)); }
           finally { setFlagP(false); }
         }} />
         {flag != null && <ReplyRow value={flag} />}
@@ -308,27 +340,39 @@ function TickerServiceTab() {
   const [statOn, setStatOn] = useState(false);
   const [pulse, setPulse]   = useState(false);
   const [pulseOn, setPulseOn] = useState(false);
-  const secSub   = useRef<ReturnType<typeof TickerService.addSecondsListener> | null>(null);
-  const statSub  = useRef<ReturnType<typeof TickerService.addStatusListener>  | null>(null);
-  const pulseSub = useRef<ReturnType<typeof TickerService.addPulseListener>   | null>(null);
+  const tsRef    = useRef<TickerService | null>(null);
+  const secSub   = useRef<ReturnType<TickerService["addSecondsListener"]> | null>(null);
+  const statSub  = useRef<ReturnType<TickerService["addStatusListener"]>  | null>(null);
+  const pulseSub = useRef<ReturnType<TickerService["addPulseListener"]>   | null>(null);
 
-  useEffect(() => () => {
-    TickerService.stopSeconds(); secSub.current?.remove();
-    TickerService.stopStatus();  statSub.current?.remove();
-    TickerService.stopPulse();   pulseSub.current?.remove();
+  useEffect(() => {
+    tsRef.current = TickerService.create();
+    return () => {
+      tsRef.current?.stopSeconds(); secSub.current?.remove();
+      tsRef.current?.stopStatus();  statSub.current?.remove();
+      tsRef.current?.stopPulse();   pulseSub.current?.remove();
+      tsRef.current?.destroy();
+      tsRef.current = null;
+    };
   }, []);
 
   const toggleSec = () => {
-    if (secOn) { TickerService.stopSeconds(); secSub.current?.remove(); setSecOn(false); }
-    else { TickerService.startSeconds(); secSub.current = TickerService.addSecondsListener(e => setSec(e.value)); setSecOn(true); }
+    const ts = tsRef.current;
+    if (!ts) return;
+    if (secOn) { ts.stopSeconds(); secSub.current?.remove(); setSecOn(false); }
+    else { ts.startSeconds(); secSub.current = ts.addSecondsListener(e => setSec(e.value)); setSecOn(true); }
   };
   const toggleStat = () => {
-    if (statOn) { TickerService.stopStatus(); statSub.current?.remove(); setStatOn(false); }
-    else { TickerService.startStatus(); statSub.current = TickerService.addStatusListener(e => setStat(e.value)); setStatOn(true); }
+    const ts = tsRef.current;
+    if (!ts) return;
+    if (statOn) { ts.stopStatus(); statSub.current?.remove(); setStatOn(false); }
+    else { ts.startStatus(); statSub.current = ts.addStatusListener(e => setStat(e.value)); setStatOn(true); }
   };
   const togglePulse = () => {
-    if (pulseOn) { TickerService.stopPulse(); pulseSub.current?.remove(); setPulseOn(false); }
-    else { TickerService.startPulse(); pulseSub.current = TickerService.addPulseListener(e => setPulse(e.value)); setPulseOn(true); }
+    const ts = tsRef.current;
+    if (!ts) return;
+    if (pulseOn) { ts.stopPulse(); pulseSub.current?.remove(); setPulseOn(false); }
+    else { ts.startPulse(); pulseSub.current = ts.addPulseListener(e => setPulse(e.value)); setPulseOn(true); }
   };
 
   return (
@@ -368,18 +412,26 @@ function TrafficLightTab() {
   const [isStopRes, setIsStopRes]   = useState<boolean | null>(null);
   const [flowColor, setFlowColor]   = useState<LightColor | null>(null);
   const [flowOn, setFlowOn]         = useState(false);
-  const flowSub = useRef<ReturnType<typeof TrafficLight.addColorListener> | null>(null);
+  const tlRef   = useRef<TrafficLight | null>(null);
+  const flowSub = useRef<ReturnType<TrafficLight["addColorListener"]> | null>(null);
 
-  useEffect(() => () => {
-    TrafficLight.stopColor();
-    flowSub.current?.remove();
+  useEffect(() => {
+    tlRef.current = TrafficLight.create();
+    return () => {
+      tlRef.current?.stopColor();
+      flowSub.current?.remove();
+      tlRef.current?.destroy();
+      tlRef.current = null;
+    };
   }, []);
 
   const toggleFlow = () => {
-    if (flowOn) { TrafficLight.stopColor(); flowSub.current?.remove(); setFlowOn(false); }
+    const tl = tlRef.current;
+    if (!tl) return;
+    if (flowOn) { tl.stopColor(); flowSub.current?.remove(); setFlowOn(false); }
     else {
-      TrafficLight.startColor();
-      flowSub.current = TrafficLight.addColorListener(e => setFlowColor(e.value));
+      tl.startColor();
+      flowSub.current = tl.addColorListener(e => setFlowColor(e.value));
       setFlowOn(true);
     }
   };
@@ -388,7 +440,7 @@ function TrafficLightTab() {
     <ScrollView contentContainerStyle={s.tab}>
 
       <FnCard name="currentColor(): LightColor">
-        <Btn label="Call" onPress={() => setSyncColor(TrafficLight.currentColor())} />
+        <Btn label="Call" onPress={() => setSyncColor(tlRef.current?.currentColor() ?? null)} />
         {syncColor != null && (
           <View style={s.enumRow}>
             <View style={[s.colorOrb, { backgroundColor: LIGHT_HEX[syncColor] ?? C.muted }]} />
@@ -403,7 +455,7 @@ function TrafficLightTab() {
             <TouchableOpacity
               key={c}
               style={[s.colorChip, selected === c && { borderColor: LIGHT_HEX[c], backgroundColor: LIGHT_HEX[c] + "22" }]}
-              onPress={() => { setSelected(c); setIsStopRes(TrafficLight.isStop(c)); }}
+              onPress={() => { setSelected(c); setIsStopRes(tlRef.current?.isStop(c) ?? null); }}
               activeOpacity={0.7}
             >
               <View style={[s.chipDot, { backgroundColor: LIGHT_HEX[c] }]} />
@@ -464,17 +516,17 @@ function FixtureTab() {
   // Flow — observeStatus
   const [status,   setStatus]   = useState<string | null>(null);
   const [statusOn, setStatusOn] = useState(false);
-  const statusSub = useRef<ReturnType<typeof FixtureAsyncApi.addObserveStatusListener> | null>(null);
+  const statusSub = useRef<ReturnType<FixtureAsyncApi["addObserveStatusListener"]> | null>(null);
 
   // Flow — observeUser
   const [liveUser,   setLiveUser]   = useState<FixtureUser | null>(null);
   const [liveUserOn, setLiveUserOn] = useState(false);
-  const liveUserSub = useRef<ReturnType<typeof FixtureAsyncApi.addObserveUserListener> | null>(null);
+  const liveUserSub = useRef<ReturnType<FixtureAsyncApi["addObserveUserListener"]> | null>(null);
 
   // Flow — observeResult
   const [result,   setResult]   = useState<FixtureResult | null>(null);
   const [resultOn, setResultOn] = useState(false);
-  const resultSub = useRef<ReturnType<typeof FixtureAsyncApi.addObserveResultListener> | null>(null);
+  const resultSub = useRef<ReturnType<FixtureAsyncApi["addObserveResultListener"]> | null>(null);
 
   // Object — FixtureAnalytics
   const [tracked,      setTracked]      = useState<string  | null>(null);
@@ -484,40 +536,104 @@ function FixtureTab() {
   const [eventsOn,     setEventsOn]     = useState(false);
   const eventSub = useRef<ReturnType<typeof FixtureAnalytics.addEventsListener> | null>(null);
 
-  useEffect(() => () => {
-    FixtureAsyncApi.stopObserveStatus();  statusSub.current?.remove();
-    FixtureAsyncApi.stopObserveUser();    liveUserSub.current?.remove();
-    FixtureAsyncApi.stopObserveResult();  resultSub.current?.remove();
-    FixtureAnalytics.stopEvents();        eventSub.current?.remove();
+  // File-scope — BridgeTypeFixture (no create/destroy, direct calls)
+  const [fsGreet,       setFsGreet]       = useState<string  | null>(null);
+  const [fsAdd,         setFsAdd]         = useState<number  | null>(null);
+  const [fsEcho,        setFsEcho]        = useState<string | null | undefined>(undefined);
+  const [fsEchoIn,      setFsEchoIn]      = useState("");
+  const [fsUser,        setFsUser]        = useState<FixtureUser | null>(null);
+  const [fsUserPending, setFsUserPending] = useState(false);
+  const [fsVersion,     setFsVersion]     = useState<string  | null>(null);
+  const [fsCounter,     setFsCounter]     = useState<number  | null>(null);
+  const [fsCounterOn,   setFsCounterOn]   = useState(false);
+  const [fsStatus,      setFsStatus]      = useState<string  | null>(null);
+  const [fsStatusOn,    setFsStatusOn]    = useState(false);
+  const [fsNullStr,     setFsNullStr]     = useState<string | null | undefined>(undefined);
+  const [fsNullStrOn,   setFsNullStrOn]   = useState(false);
+  const fsCounterSub = useRef<ReturnType<typeof BridgeTypeFixture.addFixtureObserveCounterListener> | null>(null);
+  const fsStatusSub  = useRef<ReturnType<typeof BridgeTypeFixture.addFixtureObserveStatusListener>  | null>(null);
+  const fsNullStrSub = useRef<ReturnType<typeof BridgeTypeFixture.addFixtureObserveNullableStringListener> | null>(null);
+
+  const primRef  = useRef<FixturePrimitivesApi | null>(null);
+  const asyncRef = useRef<FixtureAsyncApi | null>(null);
+
+  useEffect(() => {
+    primRef.current  = FixturePrimitivesApi.create();
+    asyncRef.current = FixtureAsyncApi.create();
+    return () => {
+      asyncRef.current?.stopObserveStatus();  statusSub.current?.remove();
+      asyncRef.current?.stopObserveUser();    liveUserSub.current?.remove();
+      asyncRef.current?.stopObserveResult();  resultSub.current?.remove();
+      FixtureAnalytics.stopEvents();          eventSub.current?.remove();
+      BridgeTypeFixture.stopFixtureObserveCounter();       fsCounterSub.current?.remove();
+      BridgeTypeFixture.stopFixtureObserveStatus();        fsStatusSub.current?.remove();
+      BridgeTypeFixture.stopFixtureObserveNullableString(); fsNullStrSub.current?.remove();
+      primRef.current?.destroy();             primRef.current  = null;
+      asyncRef.current?.destroy();            asyncRef.current = null;
+    };
   }, []);
 
   const toggleStatus = () => {
+    const api = asyncRef.current;
+    if (!api) return;
     if (statusOn) {
-      FixtureAsyncApi.stopObserveStatus(); statusSub.current?.remove(); setStatusOn(false);
+      api.stopObserveStatus(); statusSub.current?.remove(); setStatusOn(false);
     } else {
-      FixtureAsyncApi.startObserveStatus();
-      statusSub.current = FixtureAsyncApi.addObserveStatusListener(e => setStatus(e.value));
+      api.startObserveStatus();
+      statusSub.current = api.addObserveStatusListener(e => setStatus(e.value));
       setStatusOn(true);
     }
   };
 
   const toggleLiveUser = () => {
+    const api = asyncRef.current;
+    if (!api) return;
     if (liveUserOn) {
-      FixtureAsyncApi.stopObserveUser(); liveUserSub.current?.remove(); setLiveUserOn(false);
+      api.stopObserveUser(); liveUserSub.current?.remove(); setLiveUserOn(false);
     } else {
-      FixtureAsyncApi.startObserveUser();
-      liveUserSub.current = FixtureAsyncApi.addObserveUserListener(e => setLiveUser(e.value));
+      api.startObserveUser();
+      liveUserSub.current = api.addObserveUserListener(e => setLiveUser(e.value));
       setLiveUserOn(true);
     }
   };
 
   const toggleResult = () => {
+    const api = asyncRef.current;
+    if (!api) return;
     if (resultOn) {
-      FixtureAsyncApi.stopObserveResult(); resultSub.current?.remove(); setResultOn(false);
+      api.stopObserveResult(); resultSub.current?.remove(); setResultOn(false);
     } else {
-      FixtureAsyncApi.startObserveResult();
-      resultSub.current = FixtureAsyncApi.addObserveResultListener(e => setResult(e.value));
+      api.startObserveResult();
+      resultSub.current = api.addObserveResultListener(e => setResult(e.value));
       setResultOn(true);
+    }
+  };
+
+  const toggleFsCounter = () => {
+    if (fsCounterOn) {
+      BridgeTypeFixture.stopFixtureObserveCounter(); fsCounterSub.current?.remove(); setFsCounterOn(false);
+    } else {
+      BridgeTypeFixture.startFixtureObserveCounter();
+      fsCounterSub.current = BridgeTypeFixture.addFixtureObserveCounterListener(e => setFsCounter(e.value));
+      setFsCounterOn(true);
+    }
+  };
+  const toggleFsStatus = () => {
+    if (fsStatusOn) {
+      BridgeTypeFixture.stopFixtureObserveStatus(); fsStatusSub.current?.remove(); setFsStatusOn(false);
+    } else {
+      BridgeTypeFixture.startFixtureObserveStatus();
+      fsStatusSub.current = BridgeTypeFixture.addFixtureObserveStatusListener(e => setFsStatus(e.value));
+      setFsStatusOn(true);
+    }
+  };
+  const toggleFsNullStr = () => {
+    if (fsNullStrOn) {
+      BridgeTypeFixture.stopFixtureObserveNullableString(); fsNullStrSub.current?.remove(); setFsNullStrOn(false);
+    } else {
+      BridgeTypeFixture.startFixtureObserveNullableString();
+      fsNullStrSub.current = BridgeTypeFixture.addFixtureObserveNullableStringListener(e => setFsNullStr(e.value));
+      setFsNullStrOn(true);
     }
   };
 
@@ -539,10 +655,10 @@ function FixtureTab() {
 
       <FnCard name="returnString / Int / Long / Boolean">
         <Row2>
-          <Btn label="String" onPress={() => setPrimStr(FixturePrimitivesApi.returnString())} />
-          <Btn label="Int"    onPress={() => setPrimInt(FixturePrimitivesApi.returnInt())} />
-          <Btn label="Long"   onPress={() => setPrimLong(FixturePrimitivesApi.returnLong())} />
-          <Btn label="Bool"   onPress={() => setPrimBool(FixturePrimitivesApi.returnBoolean())} />
+          <Btn label="String" onPress={() => setPrimStr(primRef.current?.returnString() ?? "")} />
+          <Btn label="Int"    onPress={() => setPrimInt(primRef.current?.returnInt() ?? 0)} />
+          <Btn label="Long"   onPress={() => setPrimLong(primRef.current?.returnLong() ?? 0)} />
+          <Btn label="Bool"   onPress={() => setPrimBool(primRef.current?.returnBoolean() ?? false)} />
         </Row2>
         {primStr  != null && <ReplyRow value={`String → ${primStr}`} />}
         {primInt  != null && <ReplyRow value={`Int    → ${primInt}`} />}
@@ -551,7 +667,7 @@ function FixtureTab() {
       </FnCard>
 
       <FnCard name="returnNullableInt(): Int?">
-        <Btn label="Call" onPress={() => setNullInt(FixturePrimitivesApi.returnNullableInt())} />
+        <Btn label="Call" onPress={() => setNullInt(primRef.current?.returnNullableInt() ?? null)} />
         {nullInt !== undefined && <ReplyRow value={`→ ${nullInt}`} />}
       </FnCard>
 
@@ -562,7 +678,7 @@ function FixtureTab() {
         <StrIn value={userId} onChange={setUserId} placeholder="user id" />
         <Btn label={userPending ? "Fetching…" : "fetchUser"} disabled={userPending} onPress={async () => {
           setUserPending(true);
-          try { setUser(await FixtureAsyncApi.fetchUser(userId)); }
+          try { setUser(await asyncRef.current?.fetchUser(userId) ?? null); }
           finally { setUserPending(false); }
         }} />
         {user != null && <JsonRow value={user} />}
@@ -572,7 +688,7 @@ function FixtureTab() {
         <Btn label={nullUserPending ? "Fetching…" : "fetchNullableUser"} disabled={nullUserPending}
           onPress={async () => {
             setNullUserPending(true);
-            try { setNullUser(await FixtureAsyncApi.fetchNullableUser("nullable-test")); }
+            try { setNullUser(await asyncRef.current?.fetchNullableUser("nullable-test")); }
             finally { setNullUserPending(false); }
           }} />
         {nullUser !== undefined && <JsonRow value={nullUser} />}
@@ -580,7 +696,7 @@ function FixtureTab() {
 
       <FnCard name="deleteUser(id): Unit">
         <Btn label="deleteUser" onPress={async () => {
-          await FixtureAsyncApi.deleteUser("del-123");
+          await asyncRef.current?.deleteUser("del-123");
           setDeleted("done (Unit returned)");
         }} />
         {deleted != null && <ReplyRow value={deleted} />}
@@ -627,6 +743,56 @@ function FixtureTab() {
       <FnCard name="events(): Flow<String>">
         <Btn label={eventsOn ? "Stop" : "Start"} onPress={toggleEvents} muted={eventsOn} />
         {event != null && <ReplyRow value={event} live={eventsOn} />}
+      </FnCard>
+
+      {/* ── BridgeTypeFixture (file-scope) ─────────────────── */}
+      <Text style={s.section}>BridgeTypeFixture (file-scope)</Text>
+
+      <FnCard name="fixtureGreet(name): String">
+        <Btn label="Call" onPress={() => setFsGreet(BridgeTypeFixture.fixtureGreet("World"))} />
+        {fsGreet != null && <ReplyRow value={fsGreet} />}
+      </FnCard>
+
+      <FnCard name="fixtureAdd(a, b): Int">
+        <Btn label="6 + 7" onPress={() => setFsAdd(BridgeTypeFixture.fixtureAdd(6, 7))} />
+        {fsAdd != null && <ReplyRow value={fsAdd} />}
+      </FnCard>
+
+      <FnCard name="fixtureNullableEcho(value): String?">
+        <Row2>
+          <StrIn value={fsEchoIn} onChange={setFsEchoIn} placeholder="text or empty…" />
+          <Btn label="Call" onPress={() => setFsEcho(BridgeTypeFixture.fixtureNullableEcho(fsEchoIn || null))} />
+        </Row2>
+        {fsEcho !== undefined && <ReplyRow value={`→ ${fsEcho}`} />}
+      </FnCard>
+
+      <FnCard name="fixtureVersion: String  [property]">
+        <Btn label="Read" onPress={() => setFsVersion(BridgeTypeFixture.fixtureVersion())} />
+        {fsVersion != null && <ReplyRow value={fsVersion} />}
+      </FnCard>
+
+      <FnCard name="fixtureFetchUser(id): suspend FixtureUser">
+        <Btn label={fsUserPending ? "Fetching…" : "fetchUser"} disabled={fsUserPending} onPress={async () => {
+          setFsUserPending(true);
+          try { setFsUser(await BridgeTypeFixture.fixtureFetchUser("fs-user-1")); }
+          finally { setFsUserPending(false); }
+        }} />
+        {fsUser != null && <JsonRow value={fsUser} />}
+      </FnCard>
+
+      <FnCard name="fixtureObserveCounter(): Flow<Int>">
+        <Btn label={fsCounterOn ? "Stop" : "Start"} onPress={toggleFsCounter} muted={fsCounterOn} />
+        {fsCounter != null && <ReplyRow value={fsCounter} live={fsCounterOn} />}
+      </FnCard>
+
+      <FnCard name="fixtureObserveStatus(): Flow<FixtureStatus>">
+        <Btn label={fsStatusOn ? "Stop" : "Start"} onPress={toggleFsStatus} muted={fsStatusOn} />
+        {fsStatus != null && <ReplyRow value={fsStatus} live={fsStatusOn} />}
+      </FnCard>
+
+      <FnCard name="fixtureObserveNullableString(): Flow<String?>">
+        <Btn label={fsNullStrOn ? "Stop" : "Start"} onPress={toggleFsNullStr} muted={fsNullStrOn} />
+        {fsNullStr !== undefined && <ReplyRow value={`→ ${fsNullStr}`} live={fsNullStrOn} />}
       </FnCard>
 
     </ScrollView>

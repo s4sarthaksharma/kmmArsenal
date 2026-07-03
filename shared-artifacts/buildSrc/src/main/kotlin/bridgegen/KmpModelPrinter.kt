@@ -67,6 +67,7 @@ object KmpModelPrinter {
             is KmpDeclaration.KmpInterface    -> appendInterface(decl, indent)
             is KmpDeclaration.KmpObject       -> appendObject(decl, indent)
             is KmpDeclaration.KmpClass        -> appendClass(decl, indent)
+            is KmpDeclaration.KmpFileScope    -> appendFileScope(decl, indent)
         }
     }
 
@@ -108,6 +109,11 @@ object KmpModelPrinter {
         val label = if (decl.isAbstract) "ABSTRACT CLASS" else "CLASS"
         appendLine("${indent}$label  ${decl.name}")
         if (decl.docComment != null) appendLine("${indent}  doc: ${decl.docComment.trimmed()}")
+        appendFunctions(decl.functions, indent)
+    }
+
+    private fun StringBuilder.appendFileScope(decl: KmpDeclaration.KmpFileScope, indent: String) {
+        appendLine("${indent}FILE SCOPE  ${decl.fileName}")
         appendFunctions(decl.functions, indent)
     }
 

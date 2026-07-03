@@ -198,6 +198,23 @@ sealed class KmpDeclaration {
         val entries: List<String>,
         val docComment: String? = null,
     ) : KmpDeclaration()
+
+    /**
+     * File-level (top-level) functions and property getters from a single `.kt` source file.
+     *
+     * On Android, top-level Kotlin declarations compile into a static file facade (`FilenameKt`);
+     * on Kotlin/Native they are exposed through the generated framework. Property getters are
+     * modelled as zero-param SYNC [KmpFunction] entries with [KmpFunction.isPropertyGetter] = true.
+     *
+     * @property fileName    Source file name without extension (e.g. `"BridgeTypeFixture"`).
+     * @property packageName Fully qualified package (e.g. `"com.example.shared"`).
+     * @property functions   Top-level functions (sync, suspend, flow) and property getters.
+     */
+    data class KmpFileScope(
+        val fileName: String,
+        val packageName: String,
+        val functions: List<KmpFunction>,
+    ) : KmpDeclaration()
 }
 
 // ─── Sealed class variants ────────────────────────────────────────────────────
@@ -327,6 +344,7 @@ data class KmpFunction(
     val params: List<KmpParam>,
     val returnType: KmpTypeRef,
     val docComment: String? = null,
+    val isPropertyGetter: Boolean = false,
 ) {
     /**
      * Base name for a [FunctionKind.FLOW] function, used to derive event names and start/stop

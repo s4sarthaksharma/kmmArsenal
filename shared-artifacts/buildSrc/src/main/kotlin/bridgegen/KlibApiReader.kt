@@ -31,9 +31,14 @@ object KlibApiReader {
     private val SKIP_FUNCTION_NAMES = setOf("hashCode", "equals", "toString", "copy")
     private val COMPONENT_REGEX = Regex("^component\\d+$")
 
-    /** Regex that matches the simple name of any top-level Kotlin declaration. */
+    /** Regex that matches the simple name of any top-level class/interface/object declaration. */
     private val DECL_NAME_REGEX = Regex(
         """^\s*(?:public\s+)?(?:(?:data|sealed|abstract|open|inner|enum|annotation)\s+)*(?:class|interface|object)\s+(\w+)"""
+    )
+
+    /** Regex that matches the simple name of any top-level fun/val/var declaration. */
+    private val TOP_LEVEL_DECL_REGEX = Regex(
+        """^\s*(?:public\s+)?(?:suspend\s+)?(?:fun|val|var)\s+(\w+)"""
     )
 
     private data class ClassEntry(
@@ -45,6 +50,18 @@ object KlibApiReader {
             if (cls.hasTypeTable()) cls.typeTable else ProtoBuf.TypeTable.getDefaultInstance()
         )
     }
+
+    private data class TopLevelEntry(
+        val functions: List<ProtoBuf.Function>,
+        val properties: List<ProtoBuf.Property>,
+        val nr: NameResolverImpl,
+        val tt: TypeTable,
+    )
+
+    private data class PartData(
+        val classes: MutableList<ClassEntry> = mutableListOf(),
+        val topLevel: MutableList<TopLevelEntry> = mutableListOf(),
+    )
 
     /**
      * Reads all public declarations in [targetPackage] from [klibFile], grouped by source file.
@@ -62,21 +79,31 @@ object KlibApiReader {
             if (sourceDir != null) scanSourceFiles(sourceDir) else emptyMap()
 
         // Preserve insertion order so file order matches compilation order.
-        val partEntries = LinkedHashMap<String, MutableList<ClassEntry>>()
+        val partEntries = LinkedHashMap<String, PartData>()
 
         for (pkg in header.packageFragmentNameList) {
             if (pkg != targetPackage && !pkg.startsWith("$targetPackage.")) continue
             for (part in library.packageMetadataParts(pkg)) {
-                val fragment = parsePackageFragment(library.packageMetadata(pkg, part))
-                val nr       = NameResolverImpl(fragment.strings, fragment.qualifiedNames)
-                val list     = partEntries.getOrPut(part) { mutableListOf() }
-                fragment.class_List.forEach { list.add(ClassEntry(it, nr)) }
+                val fragment  = parsePackageFragment(library.packageMetadata(pkg, part))
+                val nr        = NameResolverImpl(fragment.strings, fragment.qualifiedNames)
+                // Top-level functions/properties live in the Package sub-message, not on
+                // PackageFragment directly. `package` is a reserved word → accessed as package_.
+                val fragmentPkg = fragment.`package`
+                val fragmentTt = TypeTable(
+                    if (fragmentPkg.hasTypeTable()) fragmentPkg.typeTable
+                    else ProtoBuf.TypeTable.getDefaultInstance()
+                )
+                val data = partEntries.getOrPut(part) { PartData() }
+                fragment.class_List.forEach { data.classes.add(ClassEntry(it, nr)) }
+                if (fragmentPkg.functionList.isNotEmpty() || fragmentPkg.propertyList.isNotEmpty()) {
+                    data.topLevel.add(TopLevelEntry(fragmentPkg.functionList, fragmentPkg.propertyList, nr, fragmentTt))
+                }
             }
         }
 
         // Build FQN → entry map across all parts for nested-class resolution.
         val byFqName: Map<String, ClassEntry> = partEntries.values
-            .flatten()
+            .flatMap { it.classes }
             .associateBy { entry ->
                 entry.nr.getClassId(entry.cls.fqName).asSingleFqName().asString()
             }
@@ -85,21 +112,38 @@ object KlibApiReader {
             .getProperty("unique_name", klibFile.name)
             .substringBefore("_")
 
-        val files = partEntries.entries.mapNotNull { (partName, entries) ->
-            val topLevel = entries.filter { entry ->
+        val files = partEntries.entries.mapNotNull { (partName, data) ->
+            val topLevel = data.classes.filter { entry ->
                 !entry.nr.getClassId(entry.cls.fqName).isNestedClass
             }
-            if (topLevel.isEmpty()) return@mapNotNull null
 
-            // Resolve file name: find the first top-level class name that maps to a source file.
+            val fileScopeFunctions = mutableListOf<KmpFunction>()
+            for (entry in data.topLevel) {
+                entry.functions.mapNotNullTo(fileScopeFunctions) { fn ->
+                    readFunction(fn, entry.nr, entry.tt, emptyList())
+                }
+                entry.properties.mapNotNullTo(fileScopeFunctions) { prop ->
+                    readPropertyAsGetter(prop, entry.nr, entry.tt)
+                }
+            }
+
+            if (topLevel.isEmpty() && fileScopeFunctions.isEmpty()) return@mapNotNull null
+
+            // Resolve file name: try class names first, then fall back to top-level function names.
             val fileName = topLevel
                 .firstNotNullOfOrNull { entry ->
                     val simpleName = entry.nr.getClassId(entry.cls.fqName).shortClassName.asString()
                     classToFile[simpleName]
-                } ?: partName
+                }
+                ?: fileScopeFunctions.firstNotNullOfOrNull { fn -> classToFile[fn.name] }
+                ?: partName
 
-            val declarations = topLevel.mapNotNull { entry ->
+            val declarations = mutableListOf<KmpDeclaration>()
+            topLevel.mapNotNullTo(declarations) { entry ->
                 readDeclaration(entry.cls, entry.nr, entry.tt, byFqName)
+            }
+            if (fileScopeFunctions.isNotEmpty()) {
+                declarations.add(KmpDeclaration.KmpFileScope(fileName, targetPackage, fileScopeFunctions))
             }
 
             if (declarations.isEmpty()) null
@@ -127,10 +171,9 @@ object KlibApiReader {
             .forEach { file ->
                 val fileName = file.nameWithoutExtension
                 file.forEachLine { line ->
-                    DECL_NAME_REGEX.find(line)
-                        ?.groupValues?.get(1)
-                        ?.takeIf { it.isNotBlank() }
-                        ?.let { name -> result.putIfAbsent(name, fileName) }
+                    val name = DECL_NAME_REGEX.find(line)?.groupValues?.get(1)
+                        ?: TOP_LEVEL_DECL_REGEX.find(line)?.groupValues?.get(1)
+                    if (!name.isNullOrBlank()) result.putIfAbsent(name, fileName)
                 }
             }
         return result
@@ -266,6 +309,24 @@ object KlibApiReader {
         }
 
         return KmpFunction(name = name, kind = kind, params = params, returnType = effectiveReturn)
+    }
+
+    private fun readPropertyAsGetter(
+        prop: ProtoBuf.Property,
+        nr: NameResolverImpl,
+        tt: TypeTable,
+    ): KmpFunction? {
+        if (Flags.VISIBILITY.get(prop.flags) != ProtoBuf.Visibility.PUBLIC) return null
+        val name = nr.getString(prop.name)
+        val returnTypeProto = if (prop.hasReturnType()) prop.returnType else tt[prop.returnTypeId]
+        val typeRef = readTypeRef(returnTypeProto, nr, tt, emptyList())
+        return KmpFunction(
+            name            = name,
+            kind            = FunctionKind.SYNC,
+            params          = emptyList(),
+            returnType      = typeRef,
+            isPropertyGetter = true,
+        )
     }
 
     // ── Field reading ─────────────────────────────────────────────────────────

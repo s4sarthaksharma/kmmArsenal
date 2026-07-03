@@ -308,3 +308,55 @@ class FixtureGenericApi<T> {
         return "fetched_generic" as T
     }
 }
+
+// ── File-level properties ─────────────────────────────────────────────────────
+
+val fixtureVersion: String = "1.0.0"
+var fixtureMutableCounter: Int = 0
+val fixtureActiveStatus: FixtureStatus = FixtureStatus.ACTIVE
+val fixtureNullableUser: FixtureUser? = null
+
+// ── File-level functions ──────────────────────────────────────────────────────
+
+fun fixtureGreet(name: String): String = "Hello, $name"
+fun fixtureAdd(a: Int, b: Int): Int = a + b
+fun fixtureNullableEcho(value: String?): String? = value
+
+suspend fun fixtureFetchUser(id: String): FixtureUser {
+    delay(100)
+    return FixtureUser(
+        id       = id,
+        age      = 30,
+        score    = 5.0,
+        active   = true,
+        byteFlag = 1,
+        longId   = 100L,
+        initial  = 'F',
+        ratio    = 1.0f,
+        status   = FixtureStatus.ACTIVE,
+        address  = null,
+        tags     = emptyList(),
+        metadata = emptyMap(),
+        aliases  = emptySet(),
+    )
+}
+
+suspend fun fixtureDeleteUser(id: String): Unit = Unit
+
+// ── File-level flows ──────────────────────────────────────────────────────────
+
+fun fixtureObserveCounter(): Flow<Int> = flow {
+    var i = 0
+    while (true) { emit(i++); delay(1_000) }
+}
+
+fun fixtureObserveStatus(): Flow<FixtureStatus> = flow {
+    val statuses = FixtureStatus.entries
+    var i = 0
+    while (true) { emit(statuses[i++ % statuses.size]); delay(1_000) }
+}
+
+fun fixtureObserveNullableString(): Flow<String?> = flow {
+    var i = 0
+    while (true) { emit(if (i % 2 == 0) "value_$i" else null); i++; delay(1_000) }
+}

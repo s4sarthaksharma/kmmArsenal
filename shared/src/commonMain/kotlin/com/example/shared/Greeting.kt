@@ -4,6 +4,10 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 
+fun saidHello(): String {
+    return "hello from greeting outer function"
+}
+
 class Greeting {
     private val platform = Platform()
 
