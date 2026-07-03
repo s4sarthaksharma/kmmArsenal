@@ -679,7 +679,7 @@ object AndroidGenerator {
         if (!isInstanceBased && fn.params.isEmpty()) {
             sb.appendLine("""    Function("${fn.name}") {""")
             if (fn.isPropertyGetter) {
-                sb.appendLine("      $instanceExpr.${fn.name}")
+                sb.appendLine("      $instanceExpr.${fn.name}$ret")
             } else {
                 sb.appendLine("      $instanceExpr.${fn.name}()$ret")
             }
