@@ -610,10 +610,12 @@ object AndroidGenerator {
             return imports to sb.toString()
         }
         val isAbstractClass = decl is KmpDeclaration.KmpClass && (decl as KmpDeclaration.KmpClass).isAbstract
-        // Abstract-class constructor parameters thread through create(...) into super(...).
-        val ctorFields = if (isAbstractClass) (decl as KmpDeclaration.KmpClass).ctorFields else emptyList()
-        if (ctorFields.size > MAX_EXPO_FUNCTION_PARAMS) {
-            val msg = "CREATE SKIPPED: $name — constructor has more than $MAX_EXPO_FUNCTION_PARAMS parameters."
+        // Abstract-class constructor parameters and abstract-property initial values both
+        // thread through create(...) — ctor args into super(...), property values into overrides.
+        val ctorFields    = if (isAbstractClass) (decl as KmpDeclaration.KmpClass).ctorFields else emptyList()
+        val abstractProps = decl.abstractProperties()
+        if (ctorFields.size + abstractProps.size > MAX_EXPO_FUNCTION_PARAMS) {
+            val msg = "CREATE SKIPPED: $name — constructor params + abstract properties exceed $MAX_EXPO_FUNCTION_PARAMS parameters."
             onSkip(msg)
             sb.appendLine()
             sb.appendLine("    // $msg")
@@ -622,7 +624,9 @@ object AndroidGenerator {
             return imports to sb.toString()
         }
         for (f in ctorFields) collectClassRefImports(f.type, enumNames, dataClassNames, sealedNames, kmpPackageName, imports)
-        val ctorParams = ctorFields.joinToString(", ") { "${it.name}: ${it.type.toBridgeParamType(enumNames, interfaceNames, abstractNames, dataClassNames, sealedNames)}" }
+        for (pr in abstractProps) collectClassRefImports(pr.type, enumNames, dataClassNames, sealedNames, kmpPackageName, imports)
+        val createParams = (ctorFields.map { it.name to it.type } + abstractProps.map { it.name to it.type })
+            .joinToString(", ") { (n, t) -> "$n: ${t.toBridgeParamType(enumNames, interfaceNames, abstractNames, dataClassNames, sealedNames)}" }
         val ctorArgs   = ctorFields.joinToString(", ") { it.type.toCallArg(it.name, enumNames, interfaceNames, abstractNames, dataClassNames, sealedNames) }
         val implBase = if (isAbstractClass) "$name($ctorArgs)" else name
         // Abstract classes: only abstract members are overridden — concrete members are
@@ -632,14 +636,23 @@ object AndroidGenerator {
         val suspendFns = decl.proxiedSuspendFunctions()
 
         sb.appendLine()
-        if (ctorParams.isEmpty()) {
+        if (createParams.isEmpty()) {
             sb.appendLine("""    Function("create") {""")
         } else {
-            sb.appendLine("""    Function("create") { $ctorParams ->""")
+            sb.appendLine("""    Function("create") { $createParams ->""")
         }
         sb.appendLine("      val instanceId = UUID.randomUUID().toString()")
         sb.appendLine("      val emitEvent = { eventName: String, body: Map<String, Any?> -> sendEvent(eventName, body) }")
+        // Hoist property conversions into locals — an override's initializer cannot reference
+        // the create() parameter of the same name (the member declaration shadows it).
+        for (pr in abstractProps) {
+            sb.appendLine("      val __${pr.name} = ${pr.type.toCallArg(pr.name, enumNames, interfaceNames, abstractNames, dataClassNames, sealedNames)}")
+        }
         sb.appendLine("      val impl = object : $implBase {")
+        for (pr in abstractProps) {
+            val kw = if (pr.isVar) "var" else "val"
+            sb.appendLine("        override $kw ${pr.name}: ${pr.type.toKotlinTypeName()} = __${pr.name}")
+        }
         for (fn in overrideFns) {
             val pList = fn.params.joinToString(", ") { "${it.name}: ${it.type.toKotlinTypeName()}" }
             val retT  = fn.returnType.toKotlinTypeName()

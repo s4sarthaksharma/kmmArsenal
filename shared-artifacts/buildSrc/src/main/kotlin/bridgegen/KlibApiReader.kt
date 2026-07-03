@@ -268,7 +268,7 @@ object KlibApiReader {
                 name        = name,
                 packageName = pkg,
                 functions   = readFunctions(cls, nr, tt, context = name, onSkip = onSkip),
-                hasAbstractProperties = hasAbstractProperties(cls),
+                abstractProps = readAbstractProperties(cls, nr, tt),
             )
 
             kind == ProtoBuf.Class.Kind.OBJECT ||
@@ -291,8 +291,8 @@ object KlibApiReader {
                 isAbstract     = modality == ProtoBuf.Modality.ABSTRACT,
                 functions      = readFunctions(cls, nr, tt, context = name, onSkip = onSkip),
                 typeParameters = cls.typeParameterList.map { nr.getString(it.name) },
-                ctorFields            = primaryConstructorFields(cls, nr, tt),
-                hasAbstractProperties = hasAbstractProperties(cls),
+                ctorFields    = primaryConstructorFields(cls, nr, tt),
+                abstractProps = readAbstractProperties(cls, nr, tt),
             )
         }
     }
@@ -326,11 +326,21 @@ object KlibApiReader {
         }
     }
 
-    /** Whether [cls] declares any public `abstract` property (blocks JS-implementation). */
-    private fun hasAbstractProperties(cls: ProtoBuf.Class): Boolean =
-        cls.propertyList.any {
+    /**
+     * Reads [cls]'s public `abstract` properties — a JS-implemented anonymous subtype overrides
+     * each with a value passed through the generated `create(...)`.
+     */
+    private fun readAbstractProperties(cls: ProtoBuf.Class, nr: NameResolverImpl, tt: TypeTable): List<KmpProperty> =
+        cls.propertyList.filter {
             Flags.VISIBILITY.get(it.flags) == ProtoBuf.Visibility.PUBLIC &&
                 Flags.MODALITY.get(it.flags) == ProtoBuf.Modality.ABSTRACT
+        }.map { prop ->
+            val typeProto = if (prop.hasReturnType()) prop.returnType else tt[prop.returnTypeId]
+            KmpProperty(
+                name  = nr.getString(prop.name),
+                type  = readTypeRef(typeProto, nr, tt, cls.typeParameterList),
+                isVar = Flags.IS_VAR.get(prop.flags),
+            )
         }
 
     // ── Function reading ──────────────────────────────────────────────────────

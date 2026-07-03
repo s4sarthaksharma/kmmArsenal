@@ -145,13 +145,28 @@ abstract class FixtureConfiguredProcessor(val label: String) {
 }
 
 /**
- * Abstract class that CANNOT be JS-implemented: abstract property (properties are not read into
- * the model, so the anonymous subclass could not override it). KMP-implemented direction still
- * bridges; create()/resolve are skipped with a message.
+ * Abstract class with an abstract property — JS-implementable: create(state) supplies the
+ * property's value and the anonymous subclass overrides it with that constant.
  */
 abstract class FixtureStatefulProcessor {
     abstract val state: String
     abstract suspend fun run(input: String): String
+}
+
+/**
+ * Abstract class that CANNOT be JS-implemented: its abstract property is Flow-typed, which has
+ * no wire representation to pass through create(). KMP-implemented direction still bridges;
+ * create()/resolve are skipped with a message.
+ */
+abstract class FixtureStreamingProcessor {
+    abstract val updates: Flow<String>
+    abstract suspend fun run(input: String): String
+}
+
+/** Interface with an abstract property — exercises the interface create(prop) path. */
+interface FixtureNamedResource {
+    val resourceName: String
+    suspend fun describeResource(): String
 }
 
 // ── Concrete class — every primitive as param and return ──────────────────────
@@ -494,6 +509,16 @@ class FixtureInterfaceApi {
     fun getStateful(): FixtureStatefulProcessor = object : FixtureStatefulProcessor() {
         override val state: String = "ready"
         override suspend fun run(input: String): String = "stateful:$input"
+    }
+
+    fun getStreaming(): FixtureStreamingProcessor = object : FixtureStreamingProcessor() {
+        override val updates: Flow<String> = flow { emit("stream-tick") }
+        override suspend fun run(input: String): String = "streamed:$input"
+    }
+
+    fun getNamedResource(): FixtureNamedResource = object : FixtureNamedResource {
+        override val resourceName: String = "kmp-resource"
+        override suspend fun describeResource(): String = "resource:$resourceName"
     }
 
     fun processRepo(repo: FixtureRepository): String = repo.findById("fixture-param").id

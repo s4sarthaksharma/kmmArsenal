@@ -212,18 +212,21 @@ object TsBridgeGenerator {
                 appendLine("  /** @internal */")
                 appendLine("  static _wrap(handle: string): $declName { return new $declName(handle) }")
                 if (jsImplementable) {
-                    // Abstract-class constructor params thread through create(...).
+                    // Abstract-class ctor params and abstract-property initial values both
+                    // thread through create(...).
                     val ctorFields = (decl as? KmpDeclaration.KmpClass)?.ctorFields ?: emptyList()
-                    if (ctorFields.size > MAX_EXPO_FUNCTION_PARAMS) {
-                        onSkip("CREATE SKIPPED: $declName — constructor has more than $MAX_EXPO_FUNCTION_PARAMS parameters.")
+                    val createFields = ctorFields.map { it.name to it.type } +
+                        decl.abstractProperties().map { it.name to it.type }
+                    if (createFields.size > MAX_EXPO_FUNCTION_PARAMS) {
+                        onSkip("CREATE SKIPPED: $declName — constructor params + abstract properties exceed $MAX_EXPO_FUNCTION_PARAMS parameters.")
                     } else {
-                        val cParams = ctorFields.joinToString(", ") {
-                            "${it.name}: ${it.type.toTsType(enumNames, dataNames, sealedNames, interfaceNames, abstractNames, wrapperMode = true)}"
+                        val cParams = createFields.joinToString(", ") { (n, t) ->
+                            "$n: ${t.toTsType(enumNames, dataNames, sealedNames, interfaceNames, abstractNames, wrapperMode = true)}"
                         }
-                        val cArgs = ctorFields.joinToString(", ") { f ->
-                            val fRef = f.type as? KmpTypeRef.ClassRef
+                        val cArgs = createFields.joinToString(", ") { (n, t) ->
+                            val fRef = t as? KmpTypeRef.ClassRef
                             val isIface = fRef != null && (fRef.simpleName in interfaceNames || fRef.simpleName in abstractNames)
-                            when { !isIface -> f.name; fRef!!.nullable -> "${f.name}?._handle ?? null"; else -> "${f.name}._handle" }
+                            when { !isIface -> n; fRef!!.nullable -> "$n?._handle ?? null"; else -> "$n._handle" }
                         }
                         appendLine("  static create($cParams): $declName { return $declName._wrap(_$declName.create($cArgs)) }")
                     }

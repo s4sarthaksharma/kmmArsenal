@@ -95,9 +95,8 @@ sealed class KmpDeclaration {
      * @property ctorFields  Primary constructor parameters — for an abstract class these are
      *                       threaded through the generated `create(...)` so a JS-implemented
      *                       anonymous subclass can call `super(...)`.
-     * @property hasAbstractProperties Whether any public property is abstract — an anonymous
-     *                       subclass would have to override it, which generators cannot emit
-     *                       (properties are not read into the model).
+     * @property abstractProps Public abstract properties — a JS-implemented anonymous subclass
+     *                       overrides each with a value passed through the generated `create(...)`.
      */
     data class KmpClass(
         val name: String,
@@ -107,7 +106,7 @@ sealed class KmpDeclaration {
         val typeParameters: List<String> = emptyList(),
         val docComment: String? = null,
         val ctorFields: List<KmpField> = emptyList(),
-        val hasAbstractProperties: Boolean = false,
+        val abstractProps: List<KmpProperty> = emptyList(),
     ) : KmpDeclaration()
 
     /**
@@ -121,16 +120,15 @@ sealed class KmpDeclaration {
      * @property packageName Fully qualified package.
      * @property functions   Abstract function signatures declared on this interface.
      * @property docComment  Reserved for KDoc; currently never populated (klib metadata carries no comments).
-     * @property hasAbstractProperties Whether any public property is abstract — a JS-implemented
-     *                       anonymous object would have to override it, which generators cannot
-     *                       emit (properties are not read into the model).
+     * @property abstractProps Public abstract properties — a JS-implemented anonymous object
+     *                       overrides each with a value passed through the generated `create(...)`.
      */
     data class KmpInterface(
         val name: String,
         val packageName: String,
         val functions: List<KmpFunction>,
         val docComment: String? = null,
-        val hasAbstractProperties: Boolean = false,
+        val abstractProps: List<KmpProperty> = emptyList(),
     ) : KmpDeclaration()
 
     /**
@@ -313,6 +311,23 @@ val KmpVariant.isNestedVariant: Boolean
 data class KmpField(
     val name: String,
     val type: KmpTypeRef,
+)
+
+/**
+ * A public `abstract` property on an interface or abstract class.
+ *
+ * Only used for the JS-implementation direction: the generated `create(...)` takes an initial
+ * value for each abstract property and the anonymous subtype overrides it with that value.
+ * (Member properties are otherwise not bridged — see the propertyList limitation.)
+ *
+ * @property name  The property identifier as declared.
+ * @property type  The fully resolved property type.
+ * @property isVar Whether declared as `var` (override keeps the setter).
+ */
+data class KmpProperty(
+    val name: String,
+    val type: KmpTypeRef,
+    val isVar: Boolean = false,
 )
 
 /**
@@ -594,17 +609,30 @@ fun KmpFunction.usesNonStringKeyMap(): Boolean {
 }
 
 /**
+ * Whether this abstract property can be supplied as a `create(...)` argument — anything with a
+ * wire representation qualifies; `Flow`-typed and generic-typed properties do not.
+ */
+fun KmpProperty.isBridgeableAsCreateArg(): Boolean =
+    type !is KmpTypeRef.FlowType && type !is KmpTypeRef.TypeParam
+
+/** This declaration's public abstract properties (empty for non-interface/non-class kinds). */
+fun KmpDeclaration.abstractProperties(): List<KmpProperty> = when (this) {
+    is KmpDeclaration.KmpInterface -> abstractProps
+    is KmpDeclaration.KmpClass     -> abstractProps
+    else -> emptyList()
+}
+
+/**
  * Whether a JS implementation of this interface/abstract class can be generated: the platform
- * bridge creates an anonymous subtype. Constructor parameters thread through the generated
- * `create(...)`, and concrete (final/open) members of an abstract class are inherited rather
- * than overridden — so the only remaining blocker is an abstract property, which would need an
- * override the generators cannot emit (properties are not read into the model). Used by all
- * three generators to decide whether to emit the `create()` / `resolve<Fn>` reverse-bridge
- * surface.
+ * bridge creates an anonymous subtype. Constructor parameters and abstract-property values
+ * thread through the generated `create(...)`, and concrete (final/open) members of an abstract
+ * class are inherited rather than overridden — so the only remaining blocker is an abstract
+ * property whose type has no wire representation (`Flow`, generic). Used by all three
+ * generators to decide whether to emit the `create()` / `resolve<Fn>` reverse-bridge surface.
  */
 fun KmpDeclaration.isJsImplementable(): Boolean = when (this) {
-    is KmpDeclaration.KmpInterface -> !hasAbstractProperties
-    is KmpDeclaration.KmpClass -> isAbstract && !hasAbstractProperties
+    is KmpDeclaration.KmpInterface -> abstractProps.all { it.isBridgeableAsCreateArg() }
+    is KmpDeclaration.KmpClass -> isAbstract && abstractProps.all { it.isBridgeableAsCreateArg() }
     else -> false
 }
 
@@ -613,7 +641,9 @@ fun KmpDeclaration.isJsImplementable(): Boolean = when (this) {
  * Returns `null` when the declaration IS JS-implementable.
  */
 fun KmpDeclaration.jsImplementabilityGap(): String? =
-    if (isJsImplementable()) null else "has abstract properties"
+    if (isJsImplementable()) null
+    else "abstract properties with no wire representation: " +
+        abstractProperties().filter { !it.isBridgeableAsCreateArg() }.joinToString(", ") { it.name }
 
 /**
  * The suspend functions a JS implementation proxies back to JS via `call<Fn>` events.

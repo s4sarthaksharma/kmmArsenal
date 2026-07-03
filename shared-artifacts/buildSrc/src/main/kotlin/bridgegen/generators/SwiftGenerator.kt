@@ -497,8 +497,10 @@ object SwiftGenerator {
         // concrete members are inherited from the real KMP class.
         val suspendFns = decl.proxiedSuspendFunctions()
         val hasSuspend = suspendFns.isNotEmpty()
-        // Abstract-class constructor parameters thread through create(...) into super.init(...).
-        val ctorFields = if (isAbstract) (decl as KmpDeclaration.KmpClass).ctorFields else emptyList()
+        // Abstract-class constructor parameters and abstract-property initial values both
+        // thread through create(...) — ctor args into super.init, property values into overrides.
+        val ctorFields    = if (isAbstract) (decl as KmpDeclaration.KmpClass).ctorFields else emptyList()
+        val abstractProps = decl.abstractProperties()
         val flows      = bridgeable.filter { it.kind == FunctionKind.FLOW }
         val hasFlows   = flows.isNotEmpty()
 
@@ -513,21 +515,39 @@ object SwiftGenerator {
 
         // ── JS impl class ─────────────────────────────────────────────────────
         val ctorInitParams = ctorFields.joinToString("") { ", ${it.name}: ${it.type.toSwiftNativeType(enumNames, dataNames, sealedNames)}" }
+        val propInitParams = abstractProps.joinToString("") { ", ${it.name}: ${it.type.toSwiftNativeType(enumNames, dataNames, sealedNames)}" }
         val superArgs      = ctorFields.joinToString(", ") { "${it.name}: ${it.name}" }
-        val superInit      = if (isAbstract) "\n    super.init($superArgs)" else ""
 
         if (!jsImplementable) {
             appendLine("// create() not generated for $name — cannot be JS-implemented (${decl.jsImplementabilityGap()}).")
         } else if (isAbstract) {
             // Abstract class: subclass; only abstract members are overridden (SKIE's __ prefixed
-            // completion-handler form for suspend) — concrete members are inherited.
+            // completion-handler form for suspend) — concrete members are inherited. Abstract
+            // properties override via stored backings supplied at init.
             appendLine("fileprivate class ${name}JsImpl: $name {")
             appendLine("  private let instanceId: String")
             appendLine("  private let emit: (String, [String: Any?]) -> Void")
-            appendLine("  init(instanceId: String$ctorInitParams, emit: @escaping (String, [String: Any?]) -> Void) {")
+            for (pr in abstractProps) {
+                val kw = if (pr.isVar) "var" else "let"
+                appendLine("  private $kw _${pr.name}: ${pr.type.toSwiftNativeType(enumNames, dataNames, sealedNames)}")
+            }
+            appendLine("  init(instanceId: String$ctorInitParams$propInitParams, emit: @escaping (String, [String: Any?]) -> Void) {")
             appendLine("    self.instanceId = instanceId")
-            appendLine("    self.emit = emit$superInit")
+            appendLine("    self.emit = emit")
+            for (pr in abstractProps) appendLine("    self._${pr.name} = ${pr.name}")
+            appendLine("    super.init($superArgs)")
             appendLine("  }")
+            for (pr in abstractProps) {
+                val nativeT = pr.type.toSwiftNativeType(enumNames, dataNames, sealedNames)
+                if (pr.isVar) {
+                    appendLine("  override var ${pr.name}: $nativeT {")
+                    appendLine("    get { _${pr.name} }")
+                    appendLine("    set { _${pr.name} = newValue }")
+                    appendLine("  }")
+                } else {
+                    appendLine("  override var ${pr.name}: $nativeT { _${pr.name} }")
+                }
+            }
 
             for (fn in allFns.filter { it.isAbstractMember }) {
                 appendLine()
@@ -581,9 +601,14 @@ object SwiftGenerator {
             appendLine()
             appendLine("  private let instanceId: String")
             appendLine("  private let emit: (String, [String: Any?]) -> Void")
-            appendLine("  init(instanceId: String, emit: @escaping (String, [String: Any?]) -> Void) {")
+            for (pr in abstractProps) {
+                // @objc var provides the getter (and setter) selectors the protocol requires.
+                appendLine("  @objc var ${pr.name}: ${pr.type.toSwiftNativeType(enumNames, dataNames, sealedNames)}")
+            }
+            appendLine("  init(instanceId: String$propInitParams, emit: @escaping (String, [String: Any?]) -> Void) {")
             appendLine("    self.instanceId = instanceId")
             appendLine("    self.emit = emit")
+            for (pr in abstractProps) appendLine("    self.${pr.name} = ${pr.name}")
             appendLine("  }")
 
             for (fn in allFns) {
@@ -674,11 +699,12 @@ object SwiftGenerator {
         // create() — instantiates JS impl class (only when JS-implementable);
         // abstract-class ctor params arrive as bridge types and convert before the init call.
         if (jsImplementable) {
-            val createParams = ctorFields.joinToString(", ") { "${it.name}: ${it.type.toSwiftBridgeType(enumNames, dataNames, sealedNames)}" }
-            val ctorArgDecls = ctorFields.map { f ->
-                val (prefix, arg) = f.type.toSwiftCallArgWithPrefix(f.name, enumNames, dataNames, sealedNames)
-                if (prefix.isEmpty() && arg == f.name) null to ", ${f.name}: ${f.name}"
-                else "      let __${f.name} = ${prefix}$arg" to ", ${f.name}: __${f.name}"
+            val createFields = ctorFields.map { it.name to it.type } + abstractProps.map { it.name to it.type }
+            val createParams = createFields.joinToString(", ") { (n, t) -> "$n: ${t.toSwiftBridgeType(enumNames, dataNames, sealedNames)}" }
+            val ctorArgDecls = createFields.map { (n, t) ->
+                val (prefix, arg) = t.toSwiftCallArgWithPrefix(n, enumNames, dataNames, sealedNames)
+                if (prefix.isEmpty() && arg == n) null to ", $n: $n"
+                else "      let __$n = ${prefix}$arg" to ", $n: __$n"
             }
             val ctorPassArgs = ctorArgDecls.joinToString("") { it.second }
             val createThrows = if (ctorArgDecls.any { it.first?.contains("try ") == true }) " throws" else ""
