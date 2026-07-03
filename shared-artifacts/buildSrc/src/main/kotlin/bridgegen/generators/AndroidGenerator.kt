@@ -212,6 +212,8 @@ object AndroidGenerator {
             "$kmpPackageName.${decl.name}",
         )
         for (variant in decl.variants) {
+            // Top-level (non-nested) variants are their own classes and need their own import.
+            if (!variant.isNestedVariant) imports.add("$kmpPackageName.${variant.variantName()}")
             for (field in variant.variantFields()) {
                 collectClassRefImports(field.type, enumNames, dataClassNames, sealedNames, kmpPackageName, imports)
             }
@@ -243,17 +245,17 @@ object AndroidGenerator {
         sb.appendLine("fun $n.toRecord(): ${n}Record = ${n}Record().also { r ->")
         sb.appendLine("    r.type = when (this) {")
         for (variant in decl.variants) {
-            sb.appendLine("        is $n.${variant.variantName()} -> \"${variant.variantName()}\"")
+            sb.appendLine("        is ${variant.variantRef(n)} -> \"${variant.variantName()}\"")
         }
         sb.appendLine("    }")
         sb.appendLine("    when (this) {")
         for (variant in decl.variants) {
-            val vName  = variant.variantName()
+            val vRef   = variant.variantRef(n)
             val fields = variant.variantFields()
             if (fields.isEmpty()) {
-                sb.appendLine("        is $n.$vName -> Unit")
+                sb.appendLine("        is $vRef -> Unit")
             } else {
-                sb.appendLine("        is $n.$vName -> {")
+                sb.appendLine("        is $vRef -> {")
                 for (field in fields) {
                     val assign = field.type.toRecordAssignment(field.name, enumNames, dataClassNames, sealedNames)
                     sb.appendLine("            r.${field.name} = $assign")
@@ -269,14 +271,15 @@ object AndroidGenerator {
         sb.appendLine("fun ${n}Record.toKmp(): $n = when (type) {")
         for (variant in decl.variants) {
             val vName     = variant.variantName()
+            val vRef      = variant.variantRef(n)
             val fields    = variant.variantFields()
             val isAbstract = (variant as? KmpVariant.ClassVariant)?.isAbstract ?: false
             when {
                 isAbstract -> sb.appendLine("    \"$vName\" -> error(\"$n.$vName is abstract — cannot deserialize\")")
-                variant is KmpVariant.ObjectVariant -> sb.appendLine("    \"$vName\" -> $n.$vName")
-                fields.isEmpty() -> sb.appendLine("    \"$vName\" -> $n.$vName()")
+                variant is KmpVariant.ObjectVariant -> sb.appendLine("    \"$vName\" -> $vRef")
+                fields.isEmpty() -> sb.appendLine("    \"$vName\" -> $vRef()")
                 else -> {
-                    sb.appendLine("    \"$vName\" -> $n.$vName(")
+                    sb.appendLine("    \"$vName\" -> $vRef(")
                     for (field in fields) {
                         val extract = field.type.fromSealedRecordField(field.name, enumNames, dataClassNames, sealedNames)
                         sb.appendLine("        ${field.name} = $extract,")
@@ -1140,6 +1143,10 @@ object AndroidGenerator {
         is KmpVariant.ClassVariant  -> fields
         is KmpVariant.ObjectVariant -> emptyList()
     }
+
+    /** Kotlin reference to this variant's type: `Parent.Variant` when nested, bare top-level name otherwise. */
+    private fun KmpVariant.variantRef(parent: String): String =
+        if (isNestedVariant) "$parent.${variantName()}" else variantName()
 
     // ── Record type helpers ───────────────────────────────────────────────────
 

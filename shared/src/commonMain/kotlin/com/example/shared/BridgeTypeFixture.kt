@@ -77,6 +77,24 @@ sealed class FixtureAuthState {
     object Refreshing : FixtureAuthState()
 }
 
+/** Sealed interface — must bridge as a tagged record, not a registry-backed interface. */
+sealed interface FixturePayment {
+    data class Card(val last4: String) : FixturePayment
+    object Cash : FixturePayment
+}
+
+/** Sealed class whose variants are declared at file top level (legal since Kotlin 1.5). */
+sealed class FixtureShape
+
+data class FixtureCircle(val radius: Double) : FixtureShape()
+data class FixtureSquare(val side: Double) : FixtureShape()
+
+/** Class with user-declared members that shadow data-class synthesized names — must be bridged. */
+class FixtureNamedOverrides {
+    override fun toString(): String = "custom-tostring"
+    fun copy(tag: String): String = "copy:$tag"
+}
+
 // ── Interface ─────────────────────────────────────────────────────────────────
 
 /** Interface exercising all three function kinds. */
@@ -365,6 +383,19 @@ typealias FixtureUserId = String
 fun fixtureEchoUserId(id: FixtureUserId): FixtureUserId = id
 
 fun fixtureGreet(name: String): String = "Hello, $name"
+
+fun fixtureDescribeShape(shape: FixtureShape): String = when (shape) {
+    is FixtureCircle -> "circle:${shape.radius}"
+    is FixtureSquare -> "square:${shape.side}"
+}
+
+fun fixturePay(payment: FixturePayment): String = when (payment) {
+    is FixturePayment.Card -> "card:${payment.last4}"
+    FixturePayment.Cash    -> "cash"
+}
+
+/** Extension function — the reader must skip it loudly (no receiver at the generated call site). */
+fun String.fixtureShout(): String = uppercase()
 fun fixtureAdd(a: Int, b: Int): Int = a + b
 fun fixtureNullableEcho(value: String?): String? = value
 

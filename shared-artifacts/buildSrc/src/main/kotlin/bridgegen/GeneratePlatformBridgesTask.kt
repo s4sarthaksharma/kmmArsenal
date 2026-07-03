@@ -73,7 +73,7 @@ abstract class GeneratePlatformBridgesTask : DefaultTask() {
         val pkg        = kmpPackageName.get()
         val fw         = frameworkName.get()
         val androidPkg = androidPackage.get()
-        val module     = KlibApiReader.read(klibDir.get().asFile, pkg, sourceDir.get().asFile)
+        val module     = KlibApiReader.read(klibDir.get().asFile, pkg, sourceDir.get().asFile, onSkip = { logger.quiet("\n  >> [Reader] $it") })
 
         val androidOut     = androidOutDir.get().asFile
         val iosOut         = iosOutDir.get().asFile

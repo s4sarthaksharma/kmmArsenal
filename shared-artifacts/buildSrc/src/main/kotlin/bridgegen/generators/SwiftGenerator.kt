@@ -267,6 +267,8 @@ object SwiftGenerator {
         appendLine("    switch type {")
         for (variant in decl.variants) {
             val vName      = variant.variantName()
+            // Top-level (non-nested) variants surface as bare Swift types, not Parent.Variant.
+            val vRef       = if (variant.isNestedVariant) "$n.$vName" else vName
             val fields     = variant.variantFields()
             val isAbstract = (variant as? KmpVariant.ClassVariant)?.isAbstract ?: false
             appendLine("    case \"$vName\":")
@@ -277,13 +279,13 @@ object SwiftGenerator {
                 }
                 variant is KmpVariant.ObjectVariant -> {
                     // Kotlin object singletons are exposed as .shared in Swift via Kotlin/Native.
-                    appendLine("      return $n.$vName.shared")
+                    appendLine("      return $vRef.shared")
                 }
                 fields.isEmpty() -> {
-                    appendLine("      return $n.$vName()")
+                    appendLine("      return $vRef()")
                 }
                 else -> {
-                    appendLine("      return $n.$vName(")
+                    appendLine("      return $vRef(")
                     for (field in fields) {
                         val (prefix, arg) = field.type.toSealedKmpConversionWithPrefix(field.name, enumNames, dataNames, sealedNames)
                         appendLine("        ${field.name}: ${prefix}$arg,")

@@ -86,8 +86,10 @@ object KlibApiReader {
      * @param targetPackage The Kotlin package to include (e.g. `"com.example.shared"`).
      * @param sourceDir     Optional commonMain source directory used to resolve source file names
      *                      from class names. When null, falls back to klib part names.
+     * @param onSkip        Callback for declarations/functions the reader excludes for reasons
+     *                      the developer should know about (e.g. extension functions).
      */
-    fun read(klibFile: File, targetPackage: String, sourceDir: File? = null): KmpModule {
+    fun read(klibFile: File, targetPackage: String, sourceDir: File? = null, onSkip: (String) -> Unit = {}): KmpModule {
         val library = resolveSingleFileKlib(KFile(klibFile.absolutePath))
         val header  = parseModuleHeader(library.moduleHeaderData)
 
@@ -124,19 +126,27 @@ object KlibApiReader {
                 entry.nr.getClassId(entry.cls.fqName).asSingleFqName().asString()
             }
 
+        // Direct subclasses of sealed classes are represented as variants of their parent's
+        // codec, never as standalone top-level declarations.
+        val sealedVariantFqns: Set<String> = byFqName.values
+            .filter { Flags.MODALITY.get(it.cls.flags) == ProtoBuf.Modality.SEALED }
+            .flatMap { e -> e.cls.sealedSubclassFqNameList.map { e.nr.getClassId(it).asSingleFqName().asString() } }
+            .toSet()
+
         val moduleName = library.manifestProperties
             .getProperty("unique_name", klibFile.name)
             .substringBefore("_")
 
         val files = partEntries.entries.mapNotNull { (partName, data) ->
             val topLevel = data.classes.filter { entry ->
-                !entry.nr.getClassId(entry.cls.fqName).isNestedClass
+                val classId = entry.nr.getClassId(entry.cls.fqName)
+                !classId.isNestedClass && classId.asSingleFqName().asString() !in sealedVariantFqns
             }
 
             val fileScopeFunctions = mutableListOf<KmpFunction>()
             for (entry in data.topLevel) {
                 entry.functions.mapNotNullTo(fileScopeFunctions) { fn ->
-                    readFunction(fn, entry.nr, entry.tt, emptyList())
+                    readFunction(fn, entry.nr, entry.tt, emptyList(), context = partName, onSkip = onSkip)
                 }
                 entry.properties.mapNotNullTo(fileScopeFunctions) { prop ->
                     readPropertyAsGetter(prop, entry.nr, entry.tt)
@@ -156,7 +166,7 @@ object KlibApiReader {
 
             val declarations = mutableListOf<KmpDeclaration>()
             topLevel.mapNotNullTo(declarations) { entry ->
-                readDeclaration(entry.cls, entry.nr, entry.tt, byFqName)
+                readDeclaration(entry.cls, entry.nr, entry.tt, byFqName, onSkip)
             }
             if (fileScopeFunctions.isNotEmpty()) {
                 declarations.add(KmpDeclaration.KmpFileScope(fileName, targetPackage, fileScopeFunctions))
@@ -211,6 +221,7 @@ object KlibApiReader {
         nr: NameResolverImpl,
         tt: TypeTable,
         all: Map<String, ClassEntry>,
+        onSkip: (String) -> Unit = {},
     ): KmpDeclaration? {
         if (Flags.VISIBILITY.get(cls.flags) != ProtoBuf.Visibility.PUBLIC) return null
         if (Flags.IS_EXPECT_CLASS.get(cls.flags)) return null
@@ -231,10 +242,31 @@ object KlibApiReader {
                 entries     = cls.enumEntryList.map { nr.getString(it.name) },
             )
 
+            // SEALED must be checked before INTERFACE: a `sealed interface` is a closed
+            // hierarchy and must bridge as a tagged record, not as a registry-backed interface.
+            modality == ProtoBuf.Modality.SEALED -> {
+                val parentFqn = classId.asSingleFqName().asString()
+                // Prefer the compiler-recorded subclass list — it also covers variants declared
+                // at file top level; fall back to nested classes for metadata without it.
+                val variantFqns =
+                    if (cls.sealedSubclassFqNameList.isNotEmpty())
+                        cls.sealedSubclassFqNameList.map { nr.getClassId(it).asSingleFqName().asString() }
+                    else cls.nestedClassNameList.map { "$parentFqn.${nr.getString(it)}" }
+                val variants = variantFqns.mapNotNull { fqn ->
+                    all[fqn]?.let { e -> readVariant(e.cls, e.nr, e.tt) }
+                }
+                KmpDeclaration.KmpSealedClass(
+                    name        = name,
+                    packageName = pkg,
+                    variants    = variants,
+                    functions   = readFunctions(cls, nr, tt, context = name, onSkip = onSkip),
+                )
+            }
+
             kind == ProtoBuf.Class.Kind.INTERFACE -> KmpDeclaration.KmpInterface(
                 name        = name,
                 packageName = pkg,
-                functions   = readFunctions(cls, nr, tt),
+                functions   = readFunctions(cls, nr, tt, context = name, onSkip = onSkip),
                 hasAbstractProperties = hasAbstractProperties(cls),
             )
 
@@ -242,35 +274,21 @@ object KlibApiReader {
             kind == ProtoBuf.Class.Kind.COMPANION_OBJECT -> KmpDeclaration.KmpObject(
                 name        = name,
                 packageName = pkg,
-                functions   = readFunctions(cls, nr, tt),
+                functions   = readFunctions(cls, nr, tt, context = name, onSkip = onSkip),
             )
-
-            modality == ProtoBuf.Modality.SEALED -> {
-                val parentFqn = classId.asSingleFqName().asString()
-                val variants = cls.nestedClassNameList.mapNotNull { idx ->
-                    val nestedFqn = "$parentFqn.${nr.getString(idx)}"
-                    all[nestedFqn]?.let { e -> readVariant(e.cls, e.nr, e.tt) }
-                }
-                KmpDeclaration.KmpSealedClass(
-                    name        = name,
-                    packageName = pkg,
-                    variants    = variants,
-                    functions   = readFunctions(cls, nr, tt),
-                )
-            }
 
             isData -> KmpDeclaration.KmpDataClass(
                 name        = name,
                 packageName = pkg,
                 fields      = primaryConstructorFields(cls, nr, tt),
-                functions   = readFunctions(cls, nr, tt),
+                functions   = readFunctions(cls, nr, tt, context = name, onSkip = onSkip),
             )
 
             else -> KmpDeclaration.KmpClass(
                 name           = name,
                 packageName    = pkg,
                 isAbstract     = modality == ProtoBuf.Modality.ABSTRACT,
-                functions      = readFunctions(cls, nr, tt),
+                functions      = readFunctions(cls, nr, tt, context = name, onSkip = onSkip),
                 typeParameters = cls.typeParameterList.map { nr.getString(it.name) },
                 hasZeroArgConstructor = cls.constructorList
                     .firstOrNull { !Flags.IS_SECONDARY.get(it.flags) }
@@ -284,20 +302,27 @@ object KlibApiReader {
      * Reads one direct subclass of a sealed class into the matching [KmpVariant] subtype: an
      * [KmpVariant.ObjectVariant] for a singleton, [KmpVariant.DataVariant] for a `data class`,
      * or [KmpVariant.ClassVariant] for a plain class (which may itself be `abstract`).
+     *
+     * `isNested` records whether the variant is declared inside the sealed parent's body —
+     * generators need it to emit `Parent.Variant` vs a bare top-level `Variant` reference.
      */
     private fun readVariant(cls: ProtoBuf.Class, nr: NameResolverImpl, tt: TypeTable): KmpVariant {
-        val name     = nr.getClassId(cls.fqName).shortClassName.asString()
+        val classId  = nr.getClassId(cls.fqName)
+        val name     = classId.shortClassName.asString()
+        val isNested = classId.isNestedClass
         val kind     = Flags.CLASS_KIND.get(cls.flags)
         val modality = Flags.MODALITY.get(cls.flags)
         val isData   = Flags.IS_DATA.get(cls.flags)
 
         return when {
-            kind == ProtoBuf.Class.Kind.OBJECT -> KmpVariant.ObjectVariant(name)
-            isData -> KmpVariant.DataVariant(name = name, fields = primaryConstructorFields(cls, nr, tt))
+            kind == ProtoBuf.Class.Kind.OBJECT -> KmpVariant.ObjectVariant(name, isNested = isNested)
+            isData -> KmpVariant.DataVariant(name = name, fields = primaryConstructorFields(cls, nr, tt), isNested = isNested)
             else   -> KmpVariant.ClassVariant(
                 name       = name,
                 fields     = primaryConstructorFields(cls, nr, tt),
-                isAbstract = modality == ProtoBuf.Modality.ABSTRACT,
+                // Sealed mid-level variants can't be constructed on decode either.
+                isAbstract = modality == ProtoBuf.Modality.ABSTRACT || modality == ProtoBuf.Modality.SEALED,
+                isNested   = isNested,
             )
         }
     }
@@ -312,8 +337,18 @@ object KlibApiReader {
     // ── Function reading ──────────────────────────────────────────────────────
 
     /** Reads every public, bridgeable function declared directly on [cls] (see [readFunction]). */
-    private fun readFunctions(cls: ProtoBuf.Class, nr: NameResolverImpl, tt: TypeTable): List<KmpFunction> =
-        cls.functionList.mapNotNull { readFunction(it, nr, tt, cls.typeParameterList) }
+    private fun readFunctions(
+        cls: ProtoBuf.Class,
+        nr: NameResolverImpl,
+        tt: TypeTable,
+        context: String = "",
+        onSkip: (String) -> Unit = {},
+    ): List<KmpFunction> {
+        val isData = Flags.IS_DATA.get(cls.flags)
+        return cls.functionList.mapNotNull {
+            readFunction(it, nr, tt, cls.typeParameterList, isDataClassMember = isData, context = context, onSkip = onSkip)
+        }
+    }
 
     /**
      * Reads one function declaration into a [KmpFunction], resolving its [FunctionKind] from
@@ -326,19 +361,32 @@ object KlibApiReader {
      *
      * @param classTypeParams the enclosing class's type parameters (for resolving `T`/`K`/`V`
      *        references in the signature); empty for a top-level function.
-     * @return `null` for non-public functions and for compiler-synthesized names
-     *         ([SKIP_FUNCTION_NAMES], `componentN()`, and special names like `<init>`).
+     * @param isDataClassMember whether the declaring class is a `data class` — only then are
+     *        the compiler-synthesized names ([SKIP_FUNCTION_NAMES], `componentN()`) filtered;
+     *        a user-declared `copy()`/`toString()` on any other type is a real API member.
+     * @return `null` for non-public functions, extension functions (reported via [onSkip] —
+     *         the generated call site would have no receiver), compiler-synthesized data-class
+     *         names, and special names like `<init>`.
      */
     private fun readFunction(
         func: ProtoBuf.Function,
         nr: NameResolverImpl,
         tt: TypeTable,
         classTypeParams: List<ProtoBuf.TypeParameter>,
+        isDataClassMember: Boolean = false,
+        context: String = "",
+        onSkip: (String) -> Unit = {},
     ): KmpFunction? {
         if (Flags.VISIBILITY.get(func.flags) != ProtoBuf.Visibility.PUBLIC) return null
 
         val name = nr.getString(func.name)
-        if (name in SKIP_FUNCTION_NAMES || name.startsWith("<") || COMPONENT_REGEX.matches(name)) return null
+        if (name.startsWith("<")) return null
+        if (isDataClassMember && (name in SKIP_FUNCTION_NAMES || COMPONENT_REGEX.matches(name))) return null
+        if (func.hasReceiverType() || func.hasReceiverTypeId()) {
+            val owner = if (context.isEmpty()) name else "$context.$name"
+            onSkip("FUNCTION SKIPPED: $owner() — extension functions are not bridged (no receiver at the call site).")
+            return null
+        }
 
         val typeParams    = classTypeParams + func.typeParameterList
         val isSuspend     = Flags.IS_SUSPEND.get(func.flags)

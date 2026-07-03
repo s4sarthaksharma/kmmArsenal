@@ -245,12 +245,15 @@ sealed class KmpVariant {
      * Carries named, ordered fields and is the most common variant kind.
      * Example: `data class Success(val user: User) : AuthState()`
      *
-     * @property name   Simple class name (e.g. `"Success"`).
-     * @property fields Primary constructor parameters in declaration order.
+     * @property name     Simple class name (e.g. `"Success"`).
+     * @property fields   Primary constructor parameters in declaration order.
+     * @property isNested Whether the variant is declared inside the sealed parent's body
+     *                    (`Parent.Success`) rather than at file top level (`Success`).
      */
     data class DataVariant(
         val name: String,
         val fields: List<KmpField>,
+        val isNested: Boolean = true,
     ) : KmpVariant()
 
     /**
@@ -258,10 +261,12 @@ sealed class KmpVariant {
      *
      * Carries no fields. Example: `object Loading : AuthState()`
      *
-     * @property name Simple object name (e.g. `"Loading"`, `"Empty"`).
+     * @property name     Simple object name (e.g. `"Loading"`, `"Empty"`).
+     * @property isNested Whether the variant is declared inside the sealed parent's body.
      */
     data class ObjectVariant(
         val name: String,
+        val isNested: Boolean = true,
     ) : KmpVariant()
 
     /**
@@ -272,15 +277,25 @@ sealed class KmpVariant {
      *
      * @property name       Simple class name (e.g. `"Retry"`).
      * @property fields     Constructor parameters in declaration order.
-     * @property isAbstract Whether this variant itself is abstract (can be further subclassed
-     *                      within the sealed hierarchy).
+     * @property isAbstract Whether this variant itself is abstract or sealed (cannot be
+     *                      constructed directly on decode).
+     * @property isNested   Whether the variant is declared inside the sealed parent's body.
      */
     data class ClassVariant(
         val name: String,
         val fields: List<KmpField>,
         val isAbstract: Boolean = false,
+        val isNested: Boolean = true,
     ) : KmpVariant()
 }
+
+/** Whether this variant is declared inside the sealed parent's body (see each variant's docs). */
+val KmpVariant.isNestedVariant: Boolean
+    get() = when (this) {
+        is KmpVariant.DataVariant   -> isNested
+        is KmpVariant.ObjectVariant -> isNested
+        is KmpVariant.ClassVariant  -> isNested
+    }
 
 // ─── Fields and functions ─────────────────────────────────────────────────────
 
