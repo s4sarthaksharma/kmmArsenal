@@ -21,6 +21,7 @@ import {
   FixtureAnalytics,
   FixturePrimitivesApi,
   FixtureInterfaceApi,
+  FixtureGenericApi,
   FixtureRepository,
   FixtureBaseProcessor,
   FixtureStatus,
@@ -557,12 +558,26 @@ function FixtureTab() {
   const fsStatusSub  = useRef<ReturnType<typeof BridgeTypeFixture.addFixtureObserveStatusListener>  | null>(null);
   const fsNullStrSub = useRef<ReturnType<typeof BridgeTypeFixture.addFixtureObserveNullableStringListener> | null>(null);
 
+  // Generics — FixtureGenericApi<T> (runtime __toWire conversion + caller-asserted T)
+  const [genUser,         setGenUser]         = useState<FixtureUser | null>(null);
+  const [genUsers,        setGenUsers]        = useState<FixtureUser[] | null>(null);
+  const [genGet,          setGenGet]          = useState<string | null>(null);
+  const [genFetched,      setGenFetched]      = useState<string | null>(null);
+  const [genFetchPending, setGenFetchPending] = useState(false);
+  const [genObs,          setGenObs]          = useState<string | null>(null);
+  const [genObsOn,        setGenObsOn]        = useState(false);
+  const genObsSub  = useRef<ReturnType<FixtureGenericApi<string>["addObserveListener"]> | null>(null);
+  const genStrRef  = useRef<FixtureGenericApi<string> | null>(null);
+  const genUserRef = useRef<FixtureGenericApi<FixtureUser> | null>(null);
+
   const primRef  = useRef<FixturePrimitivesApi | null>(null);
   const asyncRef = useRef<FixtureAsyncApi | null>(null);
 
   useEffect(() => {
     primRef.current  = FixturePrimitivesApi.create();
     asyncRef.current = FixtureAsyncApi.create();
+    genStrRef.current  = FixtureGenericApi.create<string>();
+    genUserRef.current = FixtureGenericApi.create<FixtureUser>();
     return () => {
       asyncRef.current?.stopObserveStatus();  statusSub.current?.remove();
       asyncRef.current?.stopObserveUser();    liveUserSub.current?.remove();
@@ -571,8 +586,11 @@ function FixtureTab() {
       BridgeTypeFixture.stopFixtureObserveCounter();       fsCounterSub.current?.remove();
       BridgeTypeFixture.stopFixtureObserveStatus();        fsStatusSub.current?.remove();
       BridgeTypeFixture.stopFixtureObserveNullableString(); fsNullStrSub.current?.remove();
+      genStrRef.current?.stopObserve();       genObsSub.current?.remove();
       primRef.current?.destroy();             primRef.current  = null;
       asyncRef.current?.destroy();            asyncRef.current = null;
+      genStrRef.current?.destroy();           genStrRef.current  = null;
+      genUserRef.current?.destroy();          genUserRef.current = null;
     };
   }, []);
 
@@ -796,6 +814,54 @@ function FixtureTab() {
       <FnCard name="fixtureObserveNullableString(): Flow<String?>">
         <Btn label={fsNullStrOn ? "Stop" : "Start"} onPress={toggleFsNullStr} muted={fsNullStrOn} />
         {fsNullStr !== undefined && <ReplyRow value={`→ ${fsNullStr}`} live={fsNullStrOn} />}
+      </FnCard>
+
+      {/* ── FixtureGenericApi<T> — generics ────────────────── */}
+      <Text style={s.section}>FixtureGenericApi&lt;T&gt; — generics</Text>
+
+      <FnCard name="create<FixtureUser>() → getUser(): T  [record via runtime __toWire]">
+        <Btn label="Call" onPress={() => setGenUser(genUserRef.current?.getUser() ?? null)} />
+        {genUser != null && <JsonRow value={genUser} />}
+      </FnCard>
+
+      <FnCard name="wrapUsers(): T[]  [List<T> converted element-wise]">
+        <Btn label="Call" onPress={() => setGenUsers(genUserRef.current?.wrapUsers() ?? null)} />
+        {genUsers != null && <JsonRow value={genUsers} />}
+      </FnCard>
+
+      <FnCard name="create<string>() → get(): T">
+        <Btn label="Call" onPress={() => setGenGet(genStrRef.current?.get() ?? null)} />
+        {genGet != null && <ReplyRow value={genGet} />}
+      </FnCard>
+
+      <FnCard name="fetch(): Promise<T>  [suspend]">
+        <Btn
+          label={genFetchPending ? "Fetching…" : "Call"}
+          disabled={genFetchPending}
+          onPress={async () => {
+            setGenFetchPending(true);
+            try { setGenFetched(await genStrRef.current?.fetch() ?? null); }
+            finally { setGenFetchPending(false); }
+          }}
+        />
+        {genFetched != null && <ReplyRow value={genFetched} />}
+      </FnCard>
+
+      <FnCard name="observe(): Flow<T>">
+        <Btn
+          label={genObsOn ? "Stop" : "Start"}
+          muted={genObsOn}
+          onPress={() => {
+            if (genObsOn) {
+              genStrRef.current?.stopObserve(); genObsSub.current?.remove(); setGenObsOn(false);
+            } else {
+              genStrRef.current?.startObserve();
+              genObsSub.current = genStrRef.current?.addObserveListener(e => setGenObs(e.value)) ?? null;
+              setGenObsOn(true);
+            }
+          }}
+        />
+        {genObs != null && <ReplyRow value={genObs} live={genObsOn} />}
       </FnCard>
 
     </ScrollView>
