@@ -87,10 +87,12 @@ cd expofirst && npx tsc --noEmit                                        # TypeSc
 Generated output is **gitignored** (`kmp-bridge/.gitignore`) — commits contain only
 generator/reader/fixture changes, never generated files.
 
-**KMP-module prerequisite:** a bridged module that exposes flows must contain the
-`bridgeCollectFlow` support function (see `kmp-bridge/README.md` for the snippet) — it is the
-Kotlin-side `@Throws` wrapper that lets iOS deliver flow errors instead of terminating the
-process. `generatePlatformBridges` fails with the snippet when it is missing.
+**iOS support injection:** the XCFramework must contain the `bridgeCollectFlow` support
+function — the Kotlin-side `@Throws` wrapper that lets iOS deliver flow errors instead of
+terminating the process. The KMP module carries nothing for it: `push-bridges.sh` injects it
+into the framework build only, via `scripts/bridgegen.init.gradle` (`-I` flag), and verifies
+the built framework's swiftinterface contains it. The klib/AAR never need it, so a manual
+`publishToMavenLocal` stays untouched.
 
 ## What gets skipped (loudly)
 

@@ -95,35 +95,9 @@ abstract class GeneratePlatformBridgesTask : DefaultTask() {
                 logger.warn("  !! Duplicate simple name '$dup' in the bridged API surface — generated conversions may resolve to the wrong type.")
             }
 
-        // iOS flow collection goes through the KMP module's `bridgeCollectFlow` support function
-        // (a Kotlin-side @Throws wrapper — the only way a failing flow's exception can cross the
-        // ObjC boundary instead of terminating the process). Without it the generated Swift
-        // will not compile, so fail loudly with the snippet to add.
-        val hasFlows = module.declarations.any { d ->
-            val fns = when (d) {
-                is KmpDeclaration.KmpClass -> d.functions
-                is KmpDeclaration.KmpInterface -> d.functions
-                is KmpDeclaration.KmpObject -> d.functions
-                is KmpDeclaration.KmpFileScope -> d.functions
-                else -> emptyList()
-            }
-            fns.any { it.kind == FunctionKind.FLOW }
-        }
-        val hasBridgeCollect = sourceDir.get().asFile.walkTopDown()
-            .any { it.extension == "kt" && it.readText().contains("fun bridgeCollectFlow(") }
-        if (hasFlows && !hasBridgeCollect) {
-            throw org.gradle.api.GradleException(
-                """
-                |The KMP module bridges Flow functions but has no bridgeCollectFlow support function.
-                |Add this file to its commonMain source set (see kmp-bridge/README.md):
-                |
-                |  @Throws(CancellationException::class, Throwable::class)
-                |  suspend fun bridgeCollectFlow(flow: Flow<*>, onEach: (Any?) -> Unit) {
-                |      flow.collect { onEach(it) }
-                |  }
-                """.trimMargin()
-            )
-        }
+        // Note: the bridgeCollectFlow iOS support function is NOT expected in the klib — it is
+        // injected only into the XCFramework build by scripts/bridgegen.init.gradle, and
+        // push-bridges.sh verifies its presence in the built framework's swiftinterface.
 
         val androidOut     = androidOutDir.get().asFile
         val iosOut         = iosOutDir.get().asFile

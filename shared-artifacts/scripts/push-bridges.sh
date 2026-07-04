@@ -47,8 +47,19 @@ while IFS= read -r RELATIVE_PATH; do
   echo "    Android package: $KMP_ANDROID_PKG"
   echo ""
 
-  echo "==> [1/5] Building iOS XCFramework (SKIE applied in shared)"
-  (cd "$SHARED" && ./gradlew "assemble${KMP_FRAMEWORK}ReleaseXCFramework" -q)
+  echo "==> [1/5] Building iOS XCFramework (SKIE applied in shared; bridgeCollectFlow injected)"
+  # The init script injects the bridgeCollectFlow iOS support function into this build only —
+  # the KMP module itself carries nothing, and a manual publishToMavenLocal stays untouched.
+  (cd "$SHARED" && ./gradlew "assemble${KMP_FRAMEWORK}ReleaseXCFramework" -q \
+      -I "$ARTIFACTS_ROOT/scripts/bridgegen.init.gradle" \
+      "-PbridgegenSupportPackage=$KMP_GROUP")
+
+  SWIFTINTERFACE=$(find "$SHARED/build/XCFrameworks/release/$KMP_FRAMEWORK.xcframework" -name "*.swiftinterface" | head -1)
+  if ! grep -q "bridgeCollectFlow" "$SWIFTINTERFACE"; then
+    echo "ERROR: $KMP_FRAMEWORK.xcframework is missing bridgeCollectFlow — the init-script"
+    echo "       injection failed (generated Swift flow collection will not compile)."
+    exit 1
+  fi
 
   echo "==> [2/5] Copying $KMP_FRAMEWORK.xcframework"
   rm -rf "$CONSUMER/ios/Frameworks/$KMP_FRAMEWORK.xcframework"

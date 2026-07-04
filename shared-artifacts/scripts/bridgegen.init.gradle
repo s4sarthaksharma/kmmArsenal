@@ -1,0 +1,41 @@
+// bridgegen build-time injection — applied ONLY to the pipeline's XCFramework build via
+// `-I scripts/bridgegen.init.gradle` in push-bridges.sh. The KMP module itself stays
+// completely untouched: no committed file, no build.gradle changes.
+//
+// What it injects: the `bridgeCollectFlow` iOS support function. Kotlin/Native only delivers
+// an exception across the ObjC boundary when the throwing function declares it via @Throws —
+// kotlinx's Flow.collect declares nothing, so a failing flow would terminate the app instead
+// of reaching the generated bridge's error event. Generated Swift collects every flow through
+// this wrapper. Only the iOS framework needs it, which is why a manual publishToMavenLocal
+// (without this script) stays valid for everything else.
+gradle.allprojects { project ->
+    project.plugins.withId("org.jetbrains.kotlin.multiplatform") {
+        def pkg = (project.findProperty("bridgegenSupportPackage") ?: "com.example.shared").toString()
+        def outDir = project.layout.buildDirectory.dir("generated/bridgegen/commonMain/kotlin")
+
+        def gen = project.tasks.register("generateBridgeFlowSupport") {
+            outputs.dir(outDir)
+            doLast {
+                def dir = new File(outDir.get().asFile, pkg.replace('.', '/'))
+                dir.mkdirs()
+                new File(dir, "BridgeFlowSupport.kt").text = """\
+package ${pkg}
+
+import kotlinx.coroutines.flow.Flow
+import kotlin.coroutines.cancellation.CancellationException
+
+/** Injected bridgegen support (scripts/bridgegen.init.gradle) — never call from app code. */
+@Throws(CancellationException::class, Throwable::class)
+suspend fun bridgeCollectFlow(flow: Any, onEach: (Any?) -> Unit) {
+    @Suppress("UNCHECKED_CAST")
+    (flow as Flow<Any?>).collect { onEach(it) }
+}
+"""
+            }
+        }
+
+        // The KMP plugin creates commonMain at apply time; srcDir(TaskProvider) wires the
+        // task dependency so every compilation sees the generated source.
+        project.extensions.getByName("kotlin").sourceSets.getByName("commonMain").kotlin.srcDir(gen)
+    }
+}

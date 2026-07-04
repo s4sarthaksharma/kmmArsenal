@@ -43,21 +43,16 @@ import { FixtureUser, FixtureStatus, FixtureRepository } from "kmp-bridge/src/Br
 
 Kotlin/Native only delivers an exception across the ObjC boundary when the throwing function
 declares it via `@Throws` — kotlinx's `Flow.collect` declares nothing, so on iOS a failing flow
-would terminate the app instead of firing the `error` handler. The bridged KMP module must
-therefore contain this one support function (any file in `commonMain`; app code never calls it,
-and the generator keeps it out of the bridged API):
+would terminate the app instead of firing the `error` handler. The iOS framework therefore
+needs one `@Throws`-declared support function, `bridgeCollectFlow`, which the generated Swift
+collects every flow through.
 
-```kotlin
-import kotlinx.coroutines.flow.Flow
-import kotlin.coroutines.cancellation.CancellationException
-
-@Throws(CancellationException::class, Throwable::class)
-suspend fun bridgeCollectFlow(flow: Flow<*>, onEach: (Any?) -> Unit) {
-    flow.collect { onEach(it) }
-}
-```
-
-The generation pipeline fails with this snippet if the module bridges flows without it.
+**The KMP module carries nothing for this.** `push-bridges.sh` injects the function into the
+XCFramework build only, via a Gradle init script
+(`shared-artifacts/scripts/bridgegen.init.gradle`) — no committed file, no `build.gradle`
+change, and a manual `./gradlew publishToMavenLocal` in the KMP module stays untouched (the
+klib and AAR never need the function). The script verifies the built framework actually
+contains it and fails loudly otherwise.
 
 ## Usage by KMP shape
 

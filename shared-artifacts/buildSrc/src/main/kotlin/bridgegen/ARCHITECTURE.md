@@ -403,10 +403,13 @@ map on the module class; `resolve<Fn>` looks it up by `callId`, converts the JS 
   non-throwing by type, SKIE's `collect` extension dies in `StandaloneCoroutine.
   handleJobException`, the raw completion-handler form dies in
   `Kotlin_ObjCExport_createContinuationArgumentImpl`). The only fix is catching *in Kotlin*:
-  the bridged KMP module must contain a `@Throws`-declared
-  `suspend fun bridgeCollectFlow(flow: Any, onEach: (Any?) -> Unit)` support function
-  (`GeneratePlatformBridgesTask` fails with the snippet when missing; the reader excludes it
-  from the bridged surface via the function-typed-parameter rule). The parameter is typed `Any`
+  the framework must contain a `@Throws`-declared
+  `suspend fun bridgeCollectFlow(flow: Any, onEach: (Any?) -> Unit)` support function. The KMP
+  module carries nothing for it — `push-bridges.sh` injects it into the XCFramework build only,
+  via `scripts/bridgegen.init.gradle` (`-I`), and verifies the built framework's swiftinterface
+  contains it (the klib/AAR never need it, so manual `publishToMavenLocal` is unaffected; if the
+  function ever does land in a klib, the reader's function-typed-parameter rule keeps it out of
+  the bridged surface). The parameter is typed `Any`
   rather than `Flow<*>` so SKIE does not transform it — generated Swift passes
   `SkieKotlinFlow(...)` / `SkieKotlinOptionalFlow(...)` (nullable or generic elements), which
   *is* a kotlinx `Flow` on the Kotlin side. The exception arrives as a caught Swift error →
