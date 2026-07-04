@@ -120,6 +120,28 @@ object SwiftGenerator {
                 appendSealedCodec(sealed, enumNames, dataNames, sealedNames)
             }
 
+            // ── Runtime-typed wire conversion for generic (erased) positions ─
+            // Swift codecs are fileprivate, so the helper can only convert record/sealed
+            // types declared in THIS file (plus all enums, whose .name needs no codec).
+            val needsWireHelper = sourceFile.declarations.any { d ->
+                d.declFunctions().any { fn -> fn.returnType.containsTypeParam() } ||
+                    (d as? KmpDeclaration.KmpDataClass)?.fields?.any { it.type.containsTypeParam() } == true
+            }
+            if (needsWireHelper) {
+                appendLine()
+                appendLine("fileprivate func __toWire(_ value: Any?) -> Any? {")
+                appendLine("  switch value {")
+                for (r in records) appendLine("  case let v as ${r.name}: return toRecord(v).__toDict()")
+                for (s in sealeds) appendLine("  case let v as ${s.name}: return toRecord(v).__toDict()")
+                for (e in enumNames.sorted()) appendLine("  case let v as $e: return v.name")
+                appendLine("  case let v as Set<AnyHashable>: return v.map { __toWire(\$0) }")
+                appendLine("  case let v as [Any]: return v.map { __toWire(\$0) }")
+                appendLine("  case let v as [String: Any]: return v.mapValues { __toWire(\$0) }")
+                appendLine("  default: return value")
+                appendLine("  }")
+                appendLine("}")
+            }
+
             // ── Module classes ──────────────────────────────────────────────
             val takenNames = (bridgeableDecls.filter { it !is KmpDeclaration.KmpFileScope } + interfaceDecls).map { it.declName() }.toSet()
             for (decl in bridgeableDecls) {
@@ -1338,6 +1360,8 @@ object SwiftGenerator {
             val inner = collectionBridgeExpr(rawCall, enumNames, dataNames, sealedNames)
             inner ?: rawCall
         }
+        // Generic (erased) return: convert by runtime type via the generated __toWire helper.
+        this is KmpTypeRef.TypeParam -> "__toWire($rawCall)"
         else -> rawCall
     }
 
@@ -1384,6 +1408,8 @@ object SwiftGenerator {
         this is KmpTypeRef.ClassRef && (simpleName in dataNames || simpleName in sealedNames) -> "toRecord($varName)"
         this is KmpTypeRef.ClassRef && simpleName in enumNames -> "$varName.name"
         this is KmpTypeRef.Primitive && kind == PrimitiveKind.CHAR -> "$varName.description"
+        // Generic (erased) element: convert by runtime type via the generated __toWire helper.
+        this is KmpTypeRef.TypeParam -> "__toWire($varName)"
         this is KmpTypeRef.CollectionType ->
             collectionBridgeExpr(varName, enumNames, dataNames, sealedNames)
         else -> null
@@ -1429,6 +1455,7 @@ object SwiftGenerator {
             }
         }
         this is KmpTypeRef.CollectionType && kind == CollectionKind.SET -> "Array(value)"
+        this is KmpTypeRef.TypeParam -> "__toWire(value)"
         else -> "value"
     }
 

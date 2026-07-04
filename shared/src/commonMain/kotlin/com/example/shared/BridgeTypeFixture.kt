@@ -399,6 +399,18 @@ class FixtureGenericApi<T> {
         delay(100)
         return "fetched_generic" as T
     }
+
+    // Runtime T = a data class — exercises the __toWire runtime conversion (a static
+    // conversion is impossible for erased T; without __toWire raw KMP objects leak to JS).
+    @Suppress("UNCHECKED_CAST")
+    fun getUser(): T = FixtureUser(
+        id = "generic_user", age = 33, score = 6.5, active = true, byteFlag = 2, longId = 777L,
+        initial = 'G', ratio = 0.9f, status = FixtureStatus.ACTIVE, address = null,
+        tags = listOf("generic"), metadata = mapOf("k" to 1), aliases = setOf("g"),
+    ) as T
+
+    @Suppress("UNCHECKED_CAST")
+    fun wrapUsers(): List<T> = listOf(getUser())
 }
 
 // ── File-level properties ─────────────────────────────────────────────────────

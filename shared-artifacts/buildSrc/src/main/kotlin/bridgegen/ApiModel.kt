@@ -593,6 +593,19 @@ fun KmpTypeArg.typeOrNull(): KmpTypeRef? = when (this) {
 }
 
 /**
+ * Whether this type mentions a generic type parameter anywhere (directly, or inside a
+ * collection/Flow/class type argument). Generators use this to decide when the runtime-typed
+ * `__toWire` conversion helper is needed — static conversion is impossible for erased types.
+ */
+fun KmpTypeRef.containsTypeParam(): Boolean = when (this) {
+    is KmpTypeRef.TypeParam      -> true
+    is KmpTypeRef.CollectionType -> typeArgs.any { it.typeOrNull()?.containsTypeParam() == true }
+    is KmpTypeRef.FlowType       -> typeArg.typeOrNull()?.containsTypeParam() == true
+    is KmpTypeRef.ClassRef       -> typeArgs.any { it.typeOrNull()?.containsTypeParam() == true }
+    else -> false
+}
+
+/**
  * Whether any parameter or return type of this function contains a `Map` whose key is a
  * concrete non-`String` type. JS objects are string-keyed, so such functions cannot cross the
  * bridge faithfully — generators skip them with a message. Star-projected keys (`Map<*, *>`)

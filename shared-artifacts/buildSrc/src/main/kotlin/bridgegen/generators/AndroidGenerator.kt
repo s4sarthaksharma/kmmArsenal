@@ -89,6 +89,19 @@ object AndroidGenerator {
             sealedBodies.add(body)
         }
 
+        // Runtime-typed wire conversion helper for generic (erased) positions — emitted once
+        // per file when any function return/flow element or record field mentions a type param.
+        val needsWireHelper = sourceFile.declarations.any { d ->
+            d.declFunctions().any { fn -> fn.returnType.containsTypeParam() } ||
+                (d as? KmpDeclaration.KmpDataClass)?.fields?.any { it.type.containsTypeParam() } == true ||
+                (d as? KmpDeclaration.KmpSealedClass)?.variants?.any { v -> v.variantFields().any { it.type.containsTypeParam() } } == true
+        }
+        val helperBodies = mutableListOf<String>()
+        if (needsWireHelper) {
+            (dataClassNames + sealedNames + enumNames).forEach { allImports.add("$kmpPackageName.$it") }
+            helperBodies.add(wireHelper(enumNames, dataClassNames, sealedNames))
+        }
+
         val takenNames = (modules.filter { it !is KmpDeclaration.KmpFileScope } + interfaceDecls).map { it.declName() }.toSet()
         for (decl in modules) {
             val nameOverride = if (decl is KmpDeclaration.KmpFileScope && decl.fileName in takenNames) "${decl.fileName}Kt" else null
@@ -115,6 +128,10 @@ object AndroidGenerator {
         }
         if (sealedBodies.isNotEmpty()) {
             sealedBodies.forEach { sb.appendLine(it) }
+        }
+        if (helperBodies.isNotEmpty()) {
+            sb.appendLine()
+            helperBodies.forEach { sb.appendLine(it) }
         }
         if (moduleBodies.isNotEmpty()) {
             moduleBodies.forEach { sb.appendLine(it) }
@@ -1004,6 +1021,9 @@ object AndroidGenerator {
             forRecordField && this is KmpTypeRef.Primitive && kind == PrimitiveKind.SHORT -> "$v$q.toInt()"
             this is KmpTypeRef.ClassRef && simpleName in enumNames -> "$v$q.name"
             this is KmpTypeRef.ClassRef && (simpleName in dataClassNames || simpleName in sealedNames) -> "$v$q.toRecord()"
+            // Generic (type-erased) positions: static conversion is impossible — convert by
+            // the value's runtime type via the generated __toWire helper.
+            this is KmpTypeRef.TypeParam -> "__toWire($v)"
             this is KmpTypeRef.CollectionType -> {
                 val e = "e$depth"
                 when (kind) {
@@ -1086,6 +1106,27 @@ object AndroidGenerator {
         is KmpTypeRef.FlowType       -> copy(nullable = false)
         is KmpTypeRef.ClassRef       -> copy(nullable = false)
         is KmpTypeRef.TypeParam      -> copy(nullable = false)
+    }
+
+    /**
+     * The runtime-typed wire converter emitted into files that bridge generic (type-erased)
+     * positions: the static type is unknown (`T` erased to `Any`), so conversion dispatches on
+     * the value's actual class — data/sealed classes to Records, enums to case names,
+     * collections element-wise; primitives and anything unknown pass through.
+     */
+    private fun wireHelper(
+        enumNames: Set<String>,
+        dataClassNames: Set<String>,
+        sealedNames: Set<String>,
+    ): String = buildString {
+        appendLine("private fun __toWire(value: Any?): Any? = when (value) {")
+        for (n in (dataClassNames + sealedNames).sorted()) appendLine("    is $n -> value.toRecord()")
+        for (n in enumNames.sorted()) appendLine("    is $n -> value.name")
+        appendLine("    is List<*> -> value.map { __toWire(it) }")
+        appendLine("    is Set<*> -> value.map { __toWire(it) }")
+        appendLine("    is Map<*, *> -> value.mapValues { (_, v) -> __toWire(v) }")
+        appendLine("    else -> value")
+        append("}")
     }
 
     // ── toRecord() assignment helper ──────────────────────────────────────────
@@ -1382,6 +1423,8 @@ object AndroidGenerator {
             if (nullable) "?.let { ${simpleName}Registry.register(it) }" else ".let { ${simpleName}Registry.register(it) }"
         this is KmpTypeRef.ClassRef && simpleName in abstractNames  ->
             if (nullable) "?.let { ${simpleName}Registry.register(it) }" else ".let { ${simpleName}Registry.register(it) }"
+        this is KmpTypeRef.TypeParam ->
+            ".let { r0 -> __toWire(r0) }"
         this is KmpTypeRef.CollectionType ->
             toLetSuffix { t, v -> t.toJsElemConversion(v, enumNames, dataClassNames, sealedNames, depth = 1) }
         else -> ""

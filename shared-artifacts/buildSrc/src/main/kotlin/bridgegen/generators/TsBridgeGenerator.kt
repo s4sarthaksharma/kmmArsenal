@@ -168,21 +168,26 @@ object TsBridgeGenerator {
                 appendLine("const _$n = requireNativeModule('$n');")
             }
 
-            // 7. Classes — instance handle wrapper (TS class with private handle)
+            // 7. Classes — instance handle wrapper (TS class with private handle).
+            //    Generic KMP classes become generic TS classes: the caller asserts T at
+            //    create<T>() and gets typed returns/events (the native side is type-erased).
             for (cls in classes) {
+                val tps    = cls.typeParameters
+                val tpDecl = if (tps.isEmpty()) "" else "<${tps.joinToString(", ") { "$it = unknown" }}>"
+                val tpUse  = if (tps.isEmpty()) "" else "<${tps.joinToString(", ")}>"
                 appendLine()
-                appendLine("export class ${cls.name} {")
+                appendLine("export class ${cls.name}$tpDecl {")
                 appendLine("  /** @internal */ readonly _handle: string")
                 appendLine("  private constructor(handle: string) { this._handle = handle }")
                 appendLine()
-                appendLine("  static create(): ${cls.name} {")
-                appendLine("    return new ${cls.name}(_${cls.name}.create())")
+                appendLine("  static create$tpDecl(): ${cls.name}$tpUse {")
+                appendLine("    return new ${cls.name}$tpUse(_${cls.name}.create())")
                 appendLine("  }")
                 appendLine()
                 appendLine("  destroy(): void { _${cls.name}.destroy(this._handle) }")
                 for (fn in cls.functions) {
                     appendLine()
-                    appendInstanceWrapperFunction(fn, cls.name, enumNames, dataNames, sealedNames, interfaceNames, abstractNames, onSkip)
+                    appendInstanceWrapperFunction(fn, cls.name, enumNames, dataNames, sealedNames, interfaceNames, abstractNames, onSkip, typeParams = tps.toSet())
                 }
                 appendLine("}")
             }
@@ -419,6 +424,7 @@ object TsBridgeGenerator {
         interfaceNames: Set<String>,
         abstractNames: Set<String>,
         onSkip: (String) -> Unit = {},
+        typeParams: Set<String> = emptySet(),
     ) {
         if (fn.usesNonStringKeyMap()) {
             onSkip("FUNCTION SKIPPED: $moduleName.${fn.name}() — Map with non-String keys is not bridgeable (JS objects are string-keyed).")
@@ -432,9 +438,9 @@ object TsBridgeGenerator {
                     return
                 }
                 val params = fn.params.joinToString(", ") {
-                    "${it.name}: ${it.type.toTsType(enumNames, dataNames, sealedNames, interfaceNames, abstractNames, wrapperMode = true)}"
+                    "${it.name}: ${it.type.toTsType(enumNames, dataNames, sealedNames, interfaceNames, abstractNames, wrapperMode = true, typeParams = typeParams)}"
                 }
-                val ret  = fn.returnType.toTsType(enumNames, dataNames, sealedNames, interfaceNames, abstractNames, wrapperMode = true)
+                val ret  = fn.returnType.toTsType(enumNames, dataNames, sealedNames, interfaceNames, abstractNames, wrapperMode = true, typeParams = typeParams)
                 val args = (listOf("this._handle") + fn.params.map { p ->
                     val pRef = p.type as? KmpTypeRef.ClassRef
                     val isIface = pRef != null && (pRef.simpleName in interfaceNames || pRef.simpleName in abstractNames)
@@ -455,9 +461,9 @@ object TsBridgeGenerator {
                     return
                 }
                 val params = fn.params.joinToString(", ") {
-                    "${it.name}: ${it.type.toTsType(enumNames, dataNames, sealedNames, interfaceNames, abstractNames, wrapperMode = true)}"
+                    "${it.name}: ${it.type.toTsType(enumNames, dataNames, sealedNames, interfaceNames, abstractNames, wrapperMode = true, typeParams = typeParams)}"
                 }
-                val ret  = fn.returnType.toTsType(enumNames, dataNames, sealedNames, interfaceNames, abstractNames, wrapperMode = true)
+                val ret  = fn.returnType.toTsType(enumNames, dataNames, sealedNames, interfaceNames, abstractNames, wrapperMode = true, typeParams = typeParams)
                 val args = (listOf("this._handle") + fn.params.map { p ->
                     val pRef = p.type as? KmpTypeRef.ClassRef
                     val isIface = pRef != null && (pRef.simpleName in interfaceNames || pRef.simpleName in abstractNames)
@@ -479,9 +485,9 @@ object TsBridgeGenerator {
                 }
                 val base = fn.flowBaseName
                 val cap  = base.replaceFirstChar { it.uppercase() }
-                val valueType = fn.returnType.toTsType(enumNames, dataNames, sealedNames, interfaceNames, abstractNames, wrapperMode = true)
+                val valueType = fn.returnType.toTsType(enumNames, dataNames, sealedNames, interfaceNames, abstractNames, wrapperMode = true, typeParams = typeParams)
                 val params = fn.params.joinToString(", ") {
-                    "${it.name}: ${it.type.toTsType(enumNames, dataNames, sealedNames, interfaceNames, abstractNames, wrapperMode = true)}"
+                    "${it.name}: ${it.type.toTsType(enumNames, dataNames, sealedNames, interfaceNames, abstractNames, wrapperMode = true, typeParams = typeParams)}"
                 }
                 val args = (listOf("this._handle") + fn.params.map { p ->
                     val pRef = p.type as? KmpTypeRef.ClassRef
@@ -518,6 +524,7 @@ object TsBridgeGenerator {
         interfaceNames: Set<String> = emptySet(),
         abstractNames: Set<String> = emptySet(),
         wrapperMode: Boolean = false,
+        typeParams: Set<String> = emptySet(),
     ): String {
         val base = when {
             this is KmpTypeRef.Primitive -> when (kind) {
@@ -536,15 +543,15 @@ object TsBridgeGenerator {
             this is KmpTypeRef.CollectionType -> when (kind) {
                 CollectionKind.LIST, CollectionKind.SET -> {
                     val elem = typeArgs.getOrNull(0)?.typeOrNull()
-                        ?.toTsType(enumNames, dataNames, sealedNames, interfaceNames, abstractNames, wrapperMode) ?: "unknown"
+                        ?.toTsType(enumNames, dataNames, sealedNames, interfaceNames, abstractNames, wrapperMode, typeParams) ?: "unknown"
                     // Union element types need parens: (string | null)[], not string | null[].
                     if (' ' in elem) "($elem)[]" else "$elem[]"
                 }
                 CollectionKind.MAP -> {
                     val key = typeArgs.getOrNull(0)?.typeOrNull()
-                        ?.toTsType(enumNames, dataNames, sealedNames, interfaceNames, abstractNames, wrapperMode) ?: "unknown"
+                        ?.toTsType(enumNames, dataNames, sealedNames, interfaceNames, abstractNames, wrapperMode, typeParams) ?: "unknown"
                     val value = typeArgs.getOrNull(1)?.typeOrNull()
-                        ?.toTsType(enumNames, dataNames, sealedNames, interfaceNames, abstractNames, wrapperMode) ?: "unknown"
+                        ?.toTsType(enumNames, dataNames, sealedNames, interfaceNames, abstractNames, wrapperMode, typeParams) ?: "unknown"
                     // TS index-signature keys must be string | number; everything else
                     // (star projections, enums-as-keys, unknown) degrades to string.
                     val safeKey = if (key == "string" || key == "number") key else "string"
@@ -552,7 +559,8 @@ object TsBridgeGenerator {
                 }
             }
             this is KmpTypeRef.FlowType -> "unknown"
-            this is KmpTypeRef.TypeParam -> "unknown"
+            // In a generic wrapper class the caller-asserted type parameter is in scope.
+            this is KmpTypeRef.TypeParam -> if (name in typeParams) name else "unknown"
             else -> "unknown"
         }
         val nullable = when (this) {
