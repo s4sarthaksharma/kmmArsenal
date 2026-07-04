@@ -115,7 +115,8 @@ abstract class GeneratePlatformBridgesTask : DefaultTask() {
         var ktCount    = 0
         var swiftCount = 0
         var tsCount    = 0
-        val moduleClasses = mutableListOf<String>()
+        val androidModuleClasses = mutableListOf<String>()
+        val appleModuleClasses   = mutableListOf<String>()
 
         for (sourceFile in module.files) {
 
@@ -124,7 +125,7 @@ abstract class GeneratePlatformBridgesTask : DefaultTask() {
                 File(androidOut, "${sourceFile.fileName}Module.kt").writeText(ktContent)
                 logger.lifecycle("  android/${sourceFile.fileName}Module.kt")
                 Regex("""^class (\w+Module)\s*:\s*Module\(\)""", RegexOption.MULTILINE)
-                    .findAll(ktContent).mapTo(moduleClasses) { it.groupValues[1] }
+                    .findAll(ktContent).mapTo(androidModuleClasses) { it.groupValues[1] }
                 ktCount++
             }
 
@@ -132,6 +133,11 @@ abstract class GeneratePlatformBridgesTask : DefaultTask() {
             if (swiftContent.isNotBlank()) {
                 File(iosOut, "${sourceFile.fileName}Module.swift").writeText(swiftContent)
                 logger.lifecycle("  ios/${sourceFile.fileName}Module.swift")
+                // The apple module list must reflect what Swift actually emitted — the two
+                // generators legitimately differ (e.g. zero-function interfaces exist on
+                // Android but are skipped on iOS); listing an absent class breaks autolinking.
+                Regex("""^(?:public\s+)?class (\w+Module)\s*:\s*Module\b""", RegexOption.MULTILINE)
+                    .findAll(swiftContent).mapTo(appleModuleClasses) { it.groupValues[1] }
                 swiftCount++
             }
 
@@ -144,9 +150,10 @@ abstract class GeneratePlatformBridgesTask : DefaultTask() {
         }
 
         // Write expo-module.config.json directly to consumer root.
-        moduleClasses.sort()
-        File(consumerRootFile, "expo-module.config.json").writeText(buildExpoModuleConfig(moduleClasses, androidPkg))
-        logger.lifecycle("  expo-module.config.json (${moduleClasses.size} modules)")
+        androidModuleClasses.sort()
+        appleModuleClasses.sort()
+        File(consumerRootFile, "expo-module.config.json").writeText(buildExpoModuleConfig(androidModuleClasses, appleModuleClasses, androidPkg))
+        logger.lifecycle("  expo-module.config.json (${androidModuleClasses.size} android / ${appleModuleClasses.size} apple modules)")
 
         if (ktCount == 0 && swiftCount == 0 && tsCount == 0) {
             logger.warn("Platform bridge generator: nothing to generate for $pkg")
@@ -155,9 +162,9 @@ abstract class GeneratePlatformBridgesTask : DefaultTask() {
         }
     }
 
-    private fun buildExpoModuleConfig(classes: List<String>, androidPkg: String): String {
-        val apple   = classes.joinToString(", ") { "\"$it\"" }
-        val android = classes.joinToString(", ") { "\"$androidPkg.$it\"" }
+    private fun buildExpoModuleConfig(androidClasses: List<String>, appleClasses: List<String>, androidPkg: String): String {
+        val apple   = appleClasses.joinToString(", ") { "\"$it\"" }
+        val android = androidClasses.joinToString(", ") { "\"$androidPkg.$it\"" }
         return "{\n" +
             "  \"platforms\": [\"apple\", \"android\"],\n" +
             "  \"apple\": {\n" +
