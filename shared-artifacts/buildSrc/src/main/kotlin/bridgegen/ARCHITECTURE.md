@@ -396,18 +396,25 @@ map on the module class; `resolve<Fn>` looks it up by `callId`, converts the JS 
   `__toWire` can only convert record/sealed types **declared in the same source file** (plus
   all enums — `.name` needs no codec). Cross-file record types in erased positions pass through
   unconverted. Known limitation.
-- **Flow collection avoids SKIE's `for await`.** `SkieSwiftFlowIterator.next()` is
-  non-throwing (`Failure == Never`), so a failing Kotlin flow would be uncatchable. Instead the
-  generated code converts back to the ObjC flow (`SkieKotlinFlow(...)` /
-  `SkieKotlinOptionalFlow(...)` for nullable elements) and calls
-  `collect(collector:) async throws` with a generated file-private `__FlowCollector` (an
-  `NSObject` implementing SKIE's `__emit(value:completionHandler:)` requirement). The Kotlin
-  exception arrives as a caught `NSError` → `on<Base>Error`; normal return →
-  `on<Base>Complete`; `Task.isCancelled` suppresses both on stop/destroy. Raw values arrive as
-  their ObjC representation (boxed primitives are NSNumber subclasses and cross `sendEvent`
-  as-is), so only record/sealed/enum elements need conversion (`toSwiftFlowRawValueExpr`).
-  Tasks tracked per instance in `_flowTasks: [String: [FlowKey: Task]]`. Consequence: a
-  `StateFlow`/`SharedFlow`-typed return would not compile (the converter only accepts
+- **Flow collection goes through the KMP module's `bridgeCollectFlow`.** Kotlin/Native only
+  delivers an exception across the ObjC boundary when the throwing function declares it via
+  `@Throws` — kotlinx's `Flow.collect` declares nothing, so *every* Swift-side collection path
+  terminates the process on a failing flow (verified empirically: SKIE `for await` is
+  non-throwing by type, SKIE's `collect` extension dies in `StandaloneCoroutine.
+  handleJobException`, the raw completion-handler form dies in
+  `Kotlin_ObjCExport_createContinuationArgumentImpl`). The only fix is catching *in Kotlin*:
+  the bridged KMP module must contain a `@Throws`-declared
+  `suspend fun bridgeCollectFlow(flow: Any, onEach: (Any?) -> Unit)` support function
+  (`GeneratePlatformBridgesTask` fails with the snippet when missing; the reader excludes it
+  from the bridged surface via the function-typed-parameter rule). The parameter is typed `Any`
+  rather than `Flow<*>` so SKIE does not transform it — generated Swift passes
+  `SkieKotlinFlow(...)` / `SkieKotlinOptionalFlow(...)` (nullable or generic elements), which
+  *is* a kotlinx `Flow` on the Kotlin side. The exception arrives as a caught Swift error →
+  `on<Base>Error`; normal return → `on<Base>Complete`; `Task.isCancelled` suppresses both on
+  stop/destroy. Raw values arrive in their ObjC representation (boxed primitives are NSNumber
+  subclasses and cross `sendEvent` as-is), so only record/sealed/enum elements need conversion
+  (`toSwiftFlowRawValueExpr`). Tasks tracked per instance in `_flowTasks`. Consequence: a
+  `StateFlow`/`SharedFlow`-typed return would not compile (the converters only accept
   `SkieSwiftFlow`) — plain `Flow` returns only.
 
 ## 7. Stage 3c — TsBridgeGenerator

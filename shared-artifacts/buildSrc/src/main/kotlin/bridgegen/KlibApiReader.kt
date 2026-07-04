@@ -399,6 +399,18 @@ object KlibApiReader {
         }
 
         val typeParams    = classTypeParams + func.typeParameterList
+
+        // Function-typed parameters ((T) -> R, suspend lambdas) have no wire representation.
+        // This also keeps the bridgeCollectFlow iOS support helper out of the bridged surface.
+        val hasFunctionParam = func.valueParameterList.any { param ->
+            resolveParamType(param, nr, tt, typeParams).isFunctionType()
+        }
+        if (hasFunctionParam) {
+            val owner = if (context.isEmpty()) name else "$context.$name"
+            onSkip("FUNCTION SKIPPED: $owner() — function-typed parameters are not bridged.")
+            return null
+        }
+
         val isSuspend     = Flags.IS_SUSPEND.get(func.flags)
         val returnTypeRef = resolveReturnType(func, nr, tt, typeParams)
 
@@ -464,6 +476,12 @@ object KlibApiReader {
     /** The element type `T` of a `Flow<T>` reference; star projections fall back to `String`. */
     private fun unwrapFlowElement(flow: KmpTypeRef.FlowType): KmpTypeRef =
         flow.typeArg.typeOrNull() ?: KmpTypeRef.Primitive(PrimitiveKind.STRING)
+
+    /** Whether this is a Kotlin function type (`(T) -> R`, `suspend (T) -> R`). */
+    private fun KmpTypeRef.isFunctionType(): Boolean =
+        this is KmpTypeRef.ClassRef &&
+            (qualifiedName.matches(Regex("""kotlin\.Function\d+""")) ||
+                qualifiedName.matches(Regex("""kotlin\.coroutines\.SuspendFunction\d+""")))
 
     // ── Field reading ─────────────────────────────────────────────────────────
 

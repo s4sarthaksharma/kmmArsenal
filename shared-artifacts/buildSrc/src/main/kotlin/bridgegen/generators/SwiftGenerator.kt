@@ -142,26 +142,13 @@ object SwiftGenerator {
                 appendLine("}")
             }
 
-            // ── Error-aware flow collection ──────────────────────────────────
-            // SKIE's for-await iteration is non-throwing (SkieSwiftFlowIterator.next() has
-            // Failure == Never), so a failing Kotlin flow is uncatchable through it. The
-            // ObjC-level Flow.collect(collector:completionHandler:) DOES deliver the exception
-            // as an NSError — this adapter lets generated code use that path with a closure.
-            val hasAnyFlows = (bridgeableDecls + interfaceDecls).any { d ->
-                d.declFunctions().any { it.kind == FunctionKind.FLOW }
-            }
-            if (hasAnyFlows) {
-                appendLine()
-                appendLine("fileprivate final class __FlowCollector: NSObject, Kotlinx_coroutines_coreFlowCollector {")
-                appendLine("  private let onEach: (Any?) -> Void")
-                appendLine("  init(_ onEach: @escaping (Any?) -> Void) { self.onEach = onEach }")
-                appendLine("  // SKIE __-prefixes the raw ObjC requirement (its own `emit` lives in an extension).")
-                appendLine("  func __emit(value: Any?, completionHandler: @escaping @Sendable ((any Error)?) -> Void) {")
-                appendLine("    onEach(value)")
-                appendLine("    completionHandler(nil)")
-                appendLine("  }")
-                appendLine("}")
-            }
+            // Flow collection goes through the KMP module's bridgeCollectFlow support function
+            // (a Kotlin-side @Throws wrapper). Kotlin/Native only delivers an exception across
+            // the ObjC boundary when the throwing function declares it via @Throws — kotlinx's
+            // Flow.collect declares nothing, so every Swift-side collection path (SKIE
+            // for-await, SKIE's collect extension, the raw completion-handler form) terminates
+            // the process on a failing flow instead of throwing. GeneratePlatformBridgesTask
+            // fails the build with the snippet to add when the KMP module lacks the function.
 
             // ── Module classes ──────────────────────────────────────────────
             val takenNames = (bridgeableDecls.filter { it !is KmpDeclaration.KmpFileScope } + interfaceDecls).map { it.declName() }.toSet()
@@ -1044,11 +1031,10 @@ object SwiftGenerator {
         appendLine("      guard let inst = Self._instances[instanceId] else { return }")
         appendLine("      Self._flowTasks[instanceId]![.$base] = Task { [weak self] in")
         appendLine("        guard let self else { return }")
-        appendLine("        let collector = __FlowCollector { raw in")
-        appendLine("""          self.sendEvent("$eventName", ["instanceId": instanceId, "value": $rawExpr])""")
-        appendLine("        }")
         appendLine("        do {")
-        appendLine("          try await $flowCall.collect(collector: collector)")
+        appendLine("          try await bridgeCollectFlow(flow: $flowCall, onEach: { raw in")
+        appendLine("""            self.sendEvent("$eventName", ["instanceId": instanceId, "value": $rawExpr])""")
+        appendLine("          })")
         appendLine("""          self.sendEvent("$completeEvent", ["instanceId": instanceId])""")
         appendLine("        } catch {")
         appendLine("          if !Task.isCancelled {")
@@ -1207,11 +1193,10 @@ object SwiftGenerator {
             appendLine("      if self.flowTasks[instanceId] == nil { self.flowTasks[instanceId] = [:] }")
             appendLine("      self.flowTasks[instanceId]![.$base] = Task { [weak self] in")
             appendLine("        guard let self, let inst = self.instances[instanceId] else { return }")
-            appendLine("        let collector = __FlowCollector { raw in")
-            appendLine("""          self.sendEvent("$eventName", ["instanceId": instanceId, "value": $rawExpr])""")
-            appendLine("        }")
             appendLine("        do {")
-            appendLine("          try await $flowCall.collect(collector: collector)")
+            appendLine("          try await bridgeCollectFlow(flow: $flowCall, onEach: { raw in")
+            appendLine("""            self.sendEvent("$eventName", ["instanceId": instanceId, "value": $rawExpr])""")
+            appendLine("          })")
             appendLine("""          self.sendEvent("$completeEvent", ["instanceId": instanceId])""")
             appendLine("        } catch {")
             appendLine("          if !Task.isCancelled {")
@@ -1238,11 +1223,10 @@ object SwiftGenerator {
             appendLine("      self.flowTasks[.$base]?.cancel()")
             appendLine("      self.flowTasks[.$base] = Task { [weak self] in")
             appendLine("        guard let self else { return }")
-            appendLine("        let collector = __FlowCollector { raw in")
-            appendLine("""          self.sendEvent("$eventName", ["value": $rawExpr])""")
-            appendLine("        }")
             appendLine("        do {")
-            appendLine("          try await $flowCall.collect(collector: collector)")
+            appendLine("          try await bridgeCollectFlow(flow: $flowCall, onEach: { raw in")
+            appendLine("""            self.sendEvent("$eventName", ["value": $rawExpr])""")
+            appendLine("          })")
             appendLine("""          self.sendEvent("$completeEvent", [:])""")
             appendLine("        } catch {")
             appendLine("          if !Task.isCancelled {")

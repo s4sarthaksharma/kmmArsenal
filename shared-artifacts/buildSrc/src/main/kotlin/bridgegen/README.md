@@ -87,11 +87,17 @@ cd expofirst && npx tsc --noEmit                                        # TypeSc
 Generated output is **gitignored** (`kmp-bridge/.gitignore`) — commits contain only
 generator/reader/fixture changes, never generated files.
 
+**KMP-module prerequisite:** a bridged module that exposes flows must contain the
+`bridgeCollectFlow` support function (see `kmp-bridge/README.md` for the snippet) — it is the
+Kotlin-side `@Throws` wrapper that lets iOS deliver flow errors instead of terminating the
+process. `generatePlatformBridges` fails with the snippet when it is missing.
+
 ## What gets skipped (loudly)
 
 The reader and generators never fail the build on an unbridgeable shape — they emit a
 `>> [Android|iOS|TS|Reader] … SKIPPED: …` log line and a comment in the generated output.
-Current skip reasons: extension functions, member functions on data/sealed classes,
+Current skip reasons: extension functions, functions with function-typed parameters
+(lambdas have no wire representation), member functions on data/sealed classes,
 functions with > 8 params (Expo DSL limit, including the synthetic `instanceId`),
 `Map` with non-String keys, zero-function classes/objects/file-scopes, fieldless data classes,
 `create()` for types with `Flow`/generic-typed abstract properties, and (iOS only)

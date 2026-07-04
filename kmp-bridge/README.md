@@ -39,6 +39,26 @@ import { TrafficLight, LightColor } from "kmp-bridge/src/TrafficLight";
 import { FixtureUser, FixtureStatus, FixtureRepository } from "kmp-bridge/src/BridgeTypeFixture";
 ```
 
+## One-time KMP module requirement (iOS flow errors)
+
+Kotlin/Native only delivers an exception across the ObjC boundary when the throwing function
+declares it via `@Throws` — kotlinx's `Flow.collect` declares nothing, so on iOS a failing flow
+would terminate the app instead of firing the `error` handler. The bridged KMP module must
+therefore contain this one support function (any file in `commonMain`; app code never calls it,
+and the generator keeps it out of the bridged API):
+
+```kotlin
+import kotlinx.coroutines.flow.Flow
+import kotlin.coroutines.cancellation.CancellationException
+
+@Throws(CancellationException::class, Throwable::class)
+suspend fun bridgeCollectFlow(flow: Flow<*>, onEach: (Any?) -> Unit) {
+    flow.collect { onEach(it) }
+}
+```
+
+The generation pipeline fails with this snippet if the module bridges flows without it.
+
 ## Usage by KMP shape
 
 ### Top-level functions and `object` singletons → plain const
