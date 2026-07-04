@@ -142,6 +142,27 @@ object SwiftGenerator {
                 appendLine("}")
             }
 
+            // ── Error-aware flow collection ──────────────────────────────────
+            // SKIE's for-await iteration is non-throwing (SkieSwiftFlowIterator.next() has
+            // Failure == Never), so a failing Kotlin flow is uncatchable through it. The
+            // ObjC-level Flow.collect(collector:completionHandler:) DOES deliver the exception
+            // as an NSError — this adapter lets generated code use that path with a closure.
+            val hasAnyFlows = (bridgeableDecls + interfaceDecls).any { d ->
+                d.declFunctions().any { it.kind == FunctionKind.FLOW }
+            }
+            if (hasAnyFlows) {
+                appendLine()
+                appendLine("fileprivate final class __FlowCollector: NSObject, Kotlinx_coroutines_coreFlowCollector {")
+                appendLine("  private let onEach: (Any?) -> Void")
+                appendLine("  init(_ onEach: @escaping (Any?) -> Void) { self.onEach = onEach }")
+                appendLine("  // SKIE __-prefixes the raw ObjC requirement (its own `emit` lives in an extension).")
+                appendLine("  func __emit(value: Any?, completionHandler: @escaping @Sendable ((any Error)?) -> Void) {")
+                appendLine("    onEach(value)")
+                appendLine("    completionHandler(nil)")
+                appendLine("  }")
+                appendLine("}")
+            }
+
             // ── Module classes ──────────────────────────────────────────────
             val takenNames = (bridgeableDecls.filter { it !is KmpDeclaration.KmpFileScope } + interfaceDecls).map { it.declName() }.toSet()
             for (decl in bridgeableDecls) {
@@ -372,7 +393,7 @@ object SwiftGenerator {
                 val instance   = name.decap()
                 val flows      = bridgeable.filter { it.kind == FunctionKind.FLOW }
                 val hasFlows   = flows.isNotEmpty()
-                val eventNames = flows.map { "on${it.flowBaseName.cap()}Update" }
+                val eventNames = flowEventNames(flows)
 
                 appendLine("  private let $instance = $name.shared")
                 if (hasFlows) {
@@ -412,7 +433,7 @@ object SwiftGenerator {
                 val facadeName = "${(decl as KmpDeclaration.KmpFileScope).fileName}Kt"
                 val flows      = bridgeable.filter { it.kind == FunctionKind.FLOW }
                 val hasFlows   = flows.isNotEmpty()
-                val eventNames = flows.map { "on${it.flowBaseName.cap()}Update" }
+                val eventNames = flowEventNames(flows)
 
                 if (hasFlows) {
                     val enumCases = "case " + flows.joinToString(", ") { it.flowBaseName }
@@ -448,7 +469,7 @@ object SwiftGenerator {
                 // Instance-based class: instance map + per-instance flow tracking
                 val instFlows      = bridgeable.filter { it.kind == FunctionKind.FLOW }
                 val instHasFlows   = instFlows.isNotEmpty()
-                val instEventNames = instFlows.map { "on${it.flowBaseName.cap()}Update" }
+                val instEventNames = flowEventNames(instFlows)
 
                 appendLine("  private var instances: [String: $name$typeArgsSuffix] = [:]")
                 if (instHasFlows) {
@@ -536,8 +557,8 @@ object SwiftGenerator {
         // mirrors AndroidGenerator/TsBridgeGenerator's isJsImplementable guard.
         val jsImplementable = decl.isJsImplementable()
 
-        // All events: flow updates + JS call events (for reverse bridge)
-        val flowEvents = flows.map { "on${it.flowBaseName.cap()}Update" }
+        // All events: flow updates/terminals + JS call events (for reverse bridge)
+        val flowEvents = flowEventNames(flows)
         val callEvents = if (jsImplementable) suspendFns.map { "call${it.name.cap()}" } else emptyList()
         val allEvents  = flowEvents + callEvents
 
@@ -995,8 +1016,14 @@ object SwiftGenerator {
     ) {
         val base      = fn.flowBaseName
         val Cap       = base.cap()
-        val eventName = "on${Cap}Update"
-        val valueExpr = fn.returnType.toSwiftFlowValueExpr(enumNames, dataNames, sealedNames)
+        val eventName     = "on${Cap}Update"
+        val errorEvent    = "on${Cap}Error"
+        val completeEvent = "on${Cap}Complete"
+        val rawExpr   = fn.returnType.toSwiftFlowRawValueExpr(enumNames, dataNames, sealedNames)
+        // An unbounded generic element has upper bound Any?, so SKIE surfaces Flow<T> as the
+        // Optional flow type regardless of the model's nullability.
+        val converter = if (fn.returnType.isNullable || fn.returnType is KmpTypeRef.TypeParam)
+            "SkieKotlinOptionalFlow" else "SkieKotlinFlow"
         val ownParams = fn.params.joinToString(", ") { "${it.name}: ${it.type.toSwiftBridgeType(enumNames, dataNames, sealedNames)}" }
         val paramList = if (ownParams.isEmpty()) "instanceId: String" else "instanceId: String, $ownParams"
         // Param conversions may throw (enum decode) — hoist them into locals inside the throwing
@@ -1008,6 +1035,7 @@ object SwiftGenerator {
         }
         val callArgs = argDecls.joinToString(", ") { it.second }
         val throwsClause = if (fn.needsThrows(enumNames, dataNames, sealedNames)) " throws" else ""
+        val flowCall = "$converter(inst.${fn.name}${if (fn.isPropertyGetter) "" else "($callArgs)"})"
 
         appendLine("""    Function("start$Cap") { ($paramList)$throwsClause in""")
         argDecls.mapNotNull { it.first }.forEach { appendLine(it) }
@@ -1016,8 +1044,16 @@ object SwiftGenerator {
         appendLine("      guard let inst = Self._instances[instanceId] else { return }")
         appendLine("      Self._flowTasks[instanceId]![.$base] = Task { [weak self] in")
         appendLine("        guard let self else { return }")
-        appendLine("        for await value in inst.${fn.name}${if (fn.isPropertyGetter) "" else "($callArgs)"} {")
-        appendLine("""          self.sendEvent("$eventName", ["instanceId": instanceId, "value": $valueExpr])""")
+        appendLine("        let collector = __FlowCollector { raw in")
+        appendLine("""          self.sendEvent("$eventName", ["instanceId": instanceId, "value": $rawExpr])""")
+        appendLine("        }")
+        appendLine("        do {")
+        appendLine("          try await $flowCall.collect(collector: collector)")
+        appendLine("""          self.sendEvent("$completeEvent", ["instanceId": instanceId])""")
+        appendLine("        } catch {")
+        appendLine("          if !Task.isCancelled {")
+        appendLine("""            self.sendEvent("$errorEvent", ["instanceId": instanceId, "message": error.localizedDescription])""")
+        appendLine("          }")
         appendLine("        }")
         appendLine("      }")
         appendLine("    }")
@@ -1142,8 +1178,14 @@ object SwiftGenerator {
     ) {
         val base      = fn.flowBaseName
         val Cap       = base.cap()
-        val eventName = "on${Cap}Update"
-        val valueExpr = fn.returnType.toSwiftFlowValueExpr(enumNames, dataNames, sealedNames)
+        val eventName     = "on${Cap}Update"
+        val errorEvent    = "on${Cap}Error"
+        val completeEvent = "on${Cap}Complete"
+        val rawExpr   = fn.returnType.toSwiftFlowRawValueExpr(enumNames, dataNames, sealedNames)
+        // An unbounded generic element has upper bound Any?, so SKIE surfaces Flow<T> as the
+        // Optional flow type regardless of the model's nullability.
+        val converter = if (fn.returnType.isNullable || fn.returnType is KmpTypeRef.TypeParam)
+            "SkieKotlinOptionalFlow" else "SkieKotlinFlow"
         val ownParams = fn.params.joinToString(", ") { "${it.name}: ${it.type.toSwiftBridgeType(enumNames, dataNames, sealedNames)}" }
         // Param conversions may throw (enum decode) — hoist them into locals inside the throwing
         // closure so the Task body itself stays non-throwing.
@@ -1158,14 +1200,23 @@ object SwiftGenerator {
 
         if (isInstanceBased) {
             val paramList = if (ownParams.isEmpty()) "instanceId: String" else "instanceId: String, $ownParams"
+            val flowCall = "$converter(inst.${fn.name}${if (fn.isPropertyGetter) "" else "($callArgs)"})"
             appendLine("""    Function("start$Cap") { ($paramList)$throwsClause in""")
             argDecls.mapNotNull { it.first }.forEach { appendLine(it) }
             appendLine("      self.flowTasks[instanceId]?[.$base]?.cancel()")
             appendLine("      if self.flowTasks[instanceId] == nil { self.flowTasks[instanceId] = [:] }")
             appendLine("      self.flowTasks[instanceId]![.$base] = Task { [weak self] in")
             appendLine("        guard let self, let inst = self.instances[instanceId] else { return }")
-            appendLine("        for await value in inst.${fn.name}${if (fn.isPropertyGetter) "" else "($callArgs)"} {")
-            appendLine("""          self.sendEvent("$eventName", ["instanceId": instanceId, "value": $valueExpr])""")
+            appendLine("        let collector = __FlowCollector { raw in")
+            appendLine("""          self.sendEvent("$eventName", ["instanceId": instanceId, "value": $rawExpr])""")
+            appendLine("        }")
+            appendLine("        do {")
+            appendLine("          try await $flowCall.collect(collector: collector)")
+            appendLine("""          self.sendEvent("$completeEvent", ["instanceId": instanceId])""")
+            appendLine("        } catch {")
+            appendLine("          if !Task.isCancelled {")
+            appendLine("""            self.sendEvent("$errorEvent", ["instanceId": instanceId, "message": error.localizedDescription])""")
+            appendLine("          }")
             appendLine("        }")
             appendLine("      }")
             appendLine("    }")
@@ -1177,6 +1228,7 @@ object SwiftGenerator {
         } else {
             // For file scope, `instance` is the facade type name — class method, no `self.`.
             val callPrefix = if (isFileScope) instance else "self.$instance"
+            val flowCall = "$converter($callPrefix.${fn.name}${if (fn.isPropertyGetter) "" else "($callArgs)"})"
             if (ownParams.isEmpty()) {
                 appendLine("""    Function("start$Cap") {""")
             } else {
@@ -1186,8 +1238,16 @@ object SwiftGenerator {
             appendLine("      self.flowTasks[.$base]?.cancel()")
             appendLine("      self.flowTasks[.$base] = Task { [weak self] in")
             appendLine("        guard let self else { return }")
-            appendLine("        for await value in $callPrefix.${fn.name}${if (fn.isPropertyGetter) "" else "($callArgs)"} {")
-            appendLine("""          self.sendEvent("$eventName", ["value": $valueExpr])""")
+            appendLine("        let collector = __FlowCollector { raw in")
+            appendLine("""          self.sendEvent("$eventName", ["value": $rawExpr])""")
+            appendLine("        }")
+            appendLine("        do {")
+            appendLine("          try await $flowCall.collect(collector: collector)")
+            appendLine("""          self.sendEvent("$completeEvent", [:])""")
+            appendLine("        } catch {")
+            appendLine("          if !Task.isCancelled {")
+            appendLine("""            self.sendEvent("$errorEvent", ["message": error.localizedDescription])""")
+            appendLine("          }")
             appendLine("        }")
             appendLine("      }")
             appendLine("    }")
@@ -1415,48 +1475,47 @@ object SwiftGenerator {
         else -> null
     }
 
-    /** Expression for the value sent in a flow event — wraps with toRecord for data/sealed types. */
-    private fun KmpTypeRef.toSwiftFlowValueExpr(
+    /**
+     * Expression converting a raw flow element (`raw: Any?`, as delivered by the ObjC
+     * `Flow.collect` path through `__FlowCollector`) into an event-payload value.
+     *
+     * Values arrive with Kotlin/Native's natural ObjC representation — boxed primitives are
+     * NSNumber subclasses and Strings are NSStrings, both of which cross `sendEvent` as-is, so
+     * only record/sealed/enum shapes (and collections of them) need explicit conversion.
+     */
+    private fun KmpTypeRef.toSwiftFlowRawValueExpr(
         enumNames: Set<String>,
         dataNames: Set<String>,
         sealedNames: Set<String>,
     ): String = when {
-        this is KmpTypeRef.ClassRef && simpleName in enumNames -> "value.name"
-        // Use __toDict() — sendEvent requires plain [String: Any?], not Expo Record structs
-        this is KmpTypeRef.ClassRef && (simpleName in dataNames || simpleName in sealedNames) -> "toRecord(value).__toDict()"
-        this is KmpTypeRef.Primitive -> when (kind) {
-            PrimitiveKind.INT     -> "value.intValue"
-            PrimitiveKind.LONG    -> "value.int64Value"
-            PrimitiveKind.DOUBLE  -> "value.doubleValue"
-            PrimitiveKind.FLOAT   -> "value.floatValue"
-            PrimitiveKind.BOOLEAN -> "value.boolValue"
-            PrimitiveKind.CHAR    -> "value.description"
-            PrimitiveKind.STRING,
-            PrimitiveKind.BYTE,
-            PrimitiveKind.SHORT   -> "value"
-        }
-        // sendEvent needs [String: Any?]-compatible payloads — records become dicts per element.
+        this is KmpTypeRef.ClassRef && (simpleName in dataNames || simpleName in sealedNames) ->
+            "(raw as? $simpleName).map { toRecord(\$0).__toDict() }"
+        this is KmpTypeRef.ClassRef && simpleName in enumNames -> "(raw as? $simpleName)?.name"
         this is KmpTypeRef.CollectionType && kind == CollectionKind.LIST -> {
             val elem = typeArgs.getOrNull(0)?.typeOrNull()
             when {
                 elem is KmpTypeRef.ClassRef && (elem.simpleName in dataNames || elem.simpleName in sealedNames) ->
-                    "value.map { toRecord(\$0).__toDict() }"
-                elem is KmpTypeRef.ClassRef && elem.simpleName in enumNames -> "value.map { \$0.name }"
-                else -> "value"
+                    "(raw as? [${elem.simpleName}])?.map { toRecord(\$0).__toDict() }"
+                elem is KmpTypeRef.ClassRef && elem.simpleName in enumNames ->
+                    "(raw as? [${elem.simpleName}])?.map { \$0.name }"
+                else -> "raw"
             }
         }
         this is KmpTypeRef.CollectionType && kind == CollectionKind.MAP -> {
             val v = typeArgs.getOrNull(1)?.typeOrNull()
             when {
                 v is KmpTypeRef.ClassRef && (v.simpleName in dataNames || v.simpleName in sealedNames) ->
-                    "value.mapValues { toRecord(\$0).__toDict() }"
-                v is KmpTypeRef.ClassRef && v.simpleName in enumNames -> "value.mapValues { \$0.name }"
-                else -> "value"
+                    "(raw as? [String: ${v.simpleName}])?.mapValues { toRecord(\$0).__toDict() }"
+                v is KmpTypeRef.ClassRef && v.simpleName in enumNames ->
+                    "(raw as? [String: ${v.simpleName}])?.mapValues { \$0.name }"
+                else -> "raw"
             }
         }
-        this is KmpTypeRef.CollectionType && kind == CollectionKind.SET -> "Array(value)"
-        this is KmpTypeRef.TypeParam -> "__toWire(value)"
-        else -> "value"
+        // JS has no Set — deliver as an array.
+        this is KmpTypeRef.CollectionType && kind == CollectionKind.SET ->
+            "(raw as? Set<AnyHashable>).map { Array(\$0) }"
+        this is KmpTypeRef.TypeParam -> "__toWire(raw)"
+        else -> "raw"
     }
 
     // ── Record field helpers ──────────────────────────────────────────────────
@@ -1738,6 +1797,12 @@ object SwiftGenerator {
             }
             else -> toKmpConversionWithPrefix(fieldName, enumNames, dataNames, sealedNames)
         }
+    }
+
+    /** The three event names every bridged flow declares: value updates + the two terminals. */
+    private fun flowEventNames(flows: List<KmpFunction>): List<String> = flows.flatMap { fn ->
+        val Cap = fn.flowBaseName.cap()
+        listOf("on${Cap}Update", "on${Cap}Error", "on${Cap}Complete")
     }
 
     // ── Declaration accessors ─────────────────────────────────────────────────

@@ -253,11 +253,15 @@ consequences.
   silently dropped) when the scope is cancelled before/while running — e.g. `destroy()` during
   an in-flight call. A plain `scope.launch` on a cancelled scope would never run the block and
   leave the JS promise pending forever; that was a real bug this helper fixed.
-- **FLOW** → a `start<Base>`/`stop<Base>` pair. `start` cancels any previous job for this
-  `FlowKey`, launches `flow.collect { sendEvent("on<Base>Update", mapOf("value" to convert(it))) }`
-  (instance-based variants add `"instanceId"` so JS listeners can filter). Function params
-  thread through `start` only; `stop` cancels by key regardless of start args. Flow-typed
-  *properties* reuse this with `invoke = ""` (property access).
+- **FLOW** → a `start<Base>`/`stop<Base>` pair plus **three** events per flow:
+  `on<Base>Update` (values), `on<Base>Error` (`{message}`), `on<Base>Complete` (terminals —
+  exactly one of the two fires per started stream). `start` cancels any previous job for this
+  `FlowKey`, then launches the collect wrapped in try/catch: values emit updates, a normal
+  return emits complete, an exception emits error — but `CancellationException` **rethrows**
+  so `stop`/`destroy` fire neither terminal. Instance-based variants add `"instanceId"` to
+  every payload so JS listeners can filter. Function params thread through `start` only;
+  `stop` cancels by key regardless of start args and is null-safe (registry `find`, holder
+  `?: return`). Flow-typed *properties* reuse this with `invoke = ""` (property access).
 
 Every emitter first checks the two skip conditions (param count > 8 including the synthetic
 `instanceId`; non-String-key Map) and emits a `// BRIDGE SKIPPED:` comment + `onSkip` instead
@@ -392,8 +396,19 @@ map on the module class; `resolve<Fn>` looks it up by `callId`, converts the JS 
   `__toWire` can only convert record/sealed types **declared in the same source file** (plus
   all enums — `.name` needs no codec). Cross-file record types in erased positions pass through
   unconverted. Known limitation.
-- **Flow collection** is `for await value in inst.flow()` (SKIE's `AsyncSequence`), tasks
-  tracked per instance in `_flowTasks: [String: [FlowKey: Task]]`.
+- **Flow collection avoids SKIE's `for await`.** `SkieSwiftFlowIterator.next()` is
+  non-throwing (`Failure == Never`), so a failing Kotlin flow would be uncatchable. Instead the
+  generated code converts back to the ObjC flow (`SkieKotlinFlow(...)` /
+  `SkieKotlinOptionalFlow(...)` for nullable elements) and calls
+  `collect(collector:) async throws` with a generated file-private `__FlowCollector` (an
+  `NSObject` implementing SKIE's `__emit(value:completionHandler:)` requirement). The Kotlin
+  exception arrives as a caught `NSError` → `on<Base>Error`; normal return →
+  `on<Base>Complete`; `Task.isCancelled` suppresses both on stop/destroy. Raw values arrive as
+  their ObjC representation (boxed primitives are NSNumber subclasses and cross `sendEvent`
+  as-is), so only record/sealed/enum elements need conversion (`toSwiftFlowRawValueExpr`).
+  Tasks tracked per instance in `_flowTasks: [String: [FlowKey: Task]]`. Consequence: a
+  `StateFlow`/`SharedFlow`-typed return would not compile (the converter only accepts
+  `SkieSwiftFlow`) — plain `Flow` returns only.
 
 ## 7. Stage 3c — TsBridgeGenerator
 
@@ -422,8 +437,14 @@ a mismatch would make `requireNativeModule` look up a name no native module regi
   abstractProps become parameters; interface-typed args unwrap to `._handle`), and per proxied
   suspend fn: `addCall<Fn>Listener` (filters events by `instanceId === this._handle`) and
   `resolve<Fn>(callId, result)`.
-- **Flow fns** → `start<Base>(params)`, `stop<Base>()`, `add<Base>Listener(handler)`, instance
-  variants filtering on `instanceId`.
+- **Flow fns** → one **ref-counted** `subscribe<Base>(params…, {next, error?, complete?})`
+  returning `{remove()}`: the first subscriber starts the native collection, later subscribers
+  join the live stream (their start params are ignored), the last `remove()` stops it.
+  Terminal events flip the shared per-flow `{active, count}` state (an instance field on class
+  wrappers, a module-level const for flat wrappers) so the next subscribe restarts a dead
+  stream. Instance variants filter all three events on `instanceId === this._handle`;
+  `destroy()` resets the flow states first. The ref-count is per *wrapper object* — two
+  wrappers around the same handle would fight over start/stop (documented caveat).
 - Interface-typed parameters/returns everywhere unwrap/rewrap handles
   (`p._handle` in, `X._wrap(id)` out — the TS mirror of Android's `toCallArg`/`toReturnSuffix`).
 
@@ -539,8 +560,15 @@ Function("startSeconds") { instanceId: String ->
     val holder = instances[instanceId] ?: error("Instance not found: $instanceId")
     holder.flowJobs[FlowKey.SECONDS]?.cancel()          // restart-safe: at most one collector
     holder.flowJobs[FlowKey.SECONDS] = holder.scope.launch {
-        holder.instance.secondsFlow().collect { value ->
-            sendEvent("onSecondsUpdate", mapOf("instanceId" to instanceId, "value" to value))
+        try {
+            holder.instance.secondsFlow().collect { value ->
+                sendEvent("onSecondsUpdate", mapOf("instanceId" to instanceId, "value" to value))
+            }
+            sendEvent("onSecondsComplete", mapOf("instanceId" to instanceId))
+        } catch (e: CancellationException) {
+            throw e     // stop()/destroy() are not terminal events
+        } catch (e: Exception) {
+            sendEvent("onSecondsError", mapOf("instanceId" to instanceId, "message" to (e.message ?: e.toString())))
         }
     }
 }
@@ -549,20 +577,25 @@ Function("stopSeconds") { instanceId: String -> /* cancel + remove by key */ }
 
 `destroy(instanceId)` cancels the holder's scope → all three flows die with the instance.
 
-**TS**:
+**TS** — one ref-counted `subscribe` per flow (see §7 for the counting rules):
 
 ```typescript
-startSeconds(): void { _TickerService.startSeconds(this._handle) }
-stopSeconds(): void { _TickerService.stopSeconds(this._handle) }
-addSecondsListener(handler: (event: { value: number }) => void) {
-    return _TickerService.addListener('onSecondsUpdate', (e: any) => {
-        if (e.instanceId === this._handle) handler({ value: e.value })   // per-instance filter
-    })
+subscribeSeconds(handlers: { next: (value: number) => void; error?: (message: string) => void; complete?: () => void }): { remove: () => void } {
+    const st = this._secondsState                        // { active, count } per flow
+    const subs = [
+        _TickerService.addListener('onSecondsUpdate',   (e: any) => { if (e.instanceId === this._handle) handlers.next(e.value) }),
+        _TickerService.addListener('onSecondsError',    (e: any) => { if (e.instanceId === this._handle) { st.active = false; handlers.error?.(e.message) } }),
+        _TickerService.addListener('onSecondsComplete', (e: any) => { if (e.instanceId === this._handle) { st.active = false; handlers.complete?.() } }),
+    ]
+    st.count++
+    if (!st.active) { _TickerService.startSeconds(this._handle); st.active = true }
+    // remove(): detach subs, count--, stop native collection when count hits 0
 }
 ```
 
-**Swift** mirrors Android with `Task` + `for await value in inst.secondsFlow()`, and the value
-expression unboxes SKIE's `KotlinInt` via `value.intValue` (§6.2).
+**Swift** mirrors Android's try/catch shape, but collects through the generated
+`__FlowCollector` + `SkieKotlinFlow(inst.secondsFlow()).collect(collector:)` instead of
+`for await` — the only path where a failing Kotlin flow is catchable (§6.6).
 
 ### 9.3 Interface, both directions: `FixtureNamedIface`
 
@@ -657,8 +690,9 @@ converted to a KMP type (nothing knows which `toKmp()` to run); primitives pass 
 |---|---|---|
 | Member properties invisible | reader only reads class `propertyList` for *abstract* props | T3 |
 | Inherited members not bridged | no supertype resolution in the reader | backlog |
-| Flow errors silently end the stream | generated `collect` has no catch → no error event | T4 |
 | Registries grow until `destroy()` | no GC hook on TS wrappers | T5 (FinalizationRegistry) |
+| `StateFlow`/`SharedFlow` returns fail iOS compile | error-aware collect converts via `SkieKotlinFlow(...)`, which only accepts `SkieSwiftFlow` | backlog |
+| subscribe ref-count is per wrapper object | two wrappers around one handle fight over start/stop | documented caveat |
 | `T`-typed params into KMP | reverse of `__toWire` would need to know the target type | backlog |
 | iOS `__toWire` same-file only | Swift codecs are `fileprivate` | backlog |
 | Non-String Map keys skipped | JS objects are string-keyed; a real encoding needs a design | backlog |

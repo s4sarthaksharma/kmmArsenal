@@ -79,22 +79,33 @@ const result = await worker.doWork(42);   // rejects with <NAME>_ERROR on Kotlin
 Promises settle exactly once — including rejection if you `destroy()` the instance while the
 call is in flight.
 
-### `Flow<T>` → start / stop / listener triplet
+### `Flow<T>` → `subscribe<Name>(handlers)`
 
-A Kotlin `fun secondsFlow(): Flow<Int>` (or a `Flow`-typed property) becomes three members,
+A Kotlin `fun secondsFlow(): Flow<Int>` (or a `Flow`-typed property) becomes one method,
 named after the function with any trailing `Flow` stripped:
 
 ```typescript
-const sub = ticker.addSecondsListener(({ value }) => setSeconds(value));
-ticker.startSeconds();       // starts native collection; calling again restarts it
+const sub = ticker.subscribeSeconds({
+  next:     (value)   => setSeconds(value),
+  error:    (message) => setState(`stream failed: ${message}`),   // optional
+  complete: ()        => setState("stream ended"),                // optional
+});
 // …
-ticker.stopSeconds();        // stops native collection
-sub.remove();                // detaches the JS listener
+sub.remove();   // ONE call: detaches handlers, and stops native collection when
+                // this was the last subscriber
 ```
 
-You need both halves of the cleanup: `stop…()` cancels the native collector, `sub.remove()`
-detaches the JS listener. Note: if the Kotlin flow throws, the stream just ends — no error
-event is delivered (known limitation).
+Semantics:
+
+- Subscriptions are **reference-counted**: the first `subscribe` starts the native collection,
+  later subscribers join the live stream (no restart, no replay of missed values), and the
+  last `remove()` stops it.
+- **`error` and `complete` are terminal and mutually exclusive** — exactly one fires per
+  started stream (unless you `remove()`/`destroy()` first, which fires neither). After a
+  terminal event the stream is dead; a new `subscribe` starts a fresh collection.
+- Flow functions with parameters take them before the handlers
+  (`subscribeGreeting(prefix, { next })`); when joining an already-live stream the
+  parameters are ignored — the first subscriber's arguments won.
 
 ### `data class` → plain object, `enum class` → string enum
 
@@ -157,7 +168,8 @@ records **into** `T`-typed parameters is not supported (primitives only).
 ## Rules of thumb
 
 1. Every `create()` needs a `destroy()`.
-2. Every `start<Flow>()` needs a `stop<Flow>()`, and every `add…Listener()` a `.remove()`.
+2. Every `subscribe<Flow>()` needs its subscription's `.remove()` (one call cleans up
+   everything). Remove subscriptions before calling `destroy()`.
 3. Don't edit anything in `src/`, `android/src/`, or generated `ios/*.swift` — regenerate
    instead (`cd shared-artifacts && bash scripts/push-bridges.sh --publish`), and remember to
    `./gradlew publishToMavenLocal` in `shared/` first if Kotlin code changed.

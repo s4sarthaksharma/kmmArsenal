@@ -175,16 +175,20 @@ object TsBridgeGenerator {
                 val tps    = cls.typeParameters
                 val tpDecl = if (tps.isEmpty()) "" else "<${tps.joinToString(", ") { "$it = unknown" }}>"
                 val tpUse  = if (tps.isEmpty()) "" else "<${tps.joinToString(", ")}>"
+                val flowFns = cls.functions.subscribableFlows(instanceBased = true)
                 appendLine()
                 appendLine("export class ${cls.name}$tpDecl {")
                 appendLine("  /** @internal */ readonly _handle: string")
+                for (f in flowFns) {
+                    appendLine("  private _${f.flowBaseName}State = { active: false, count: 0 }")
+                }
                 appendLine("  private constructor(handle: string) { this._handle = handle }")
                 appendLine()
                 appendLine("  static create$tpDecl(): ${cls.name}$tpUse {")
                 appendLine("    return new ${cls.name}$tpUse(_${cls.name}.create())")
                 appendLine("  }")
                 appendLine()
-                appendLine("  destroy(): void { _${cls.name}.destroy(this._handle) }")
+                appendDestroy(cls.name, flowFns)
                 for (fn in cls.functions) {
                     appendLine()
                     appendInstanceWrapperFunction(fn, cls.name, enumNames, dataNames, sealedNames, interfaceNames, abstractNames, onSkip, typeParams = tps.toSet())
@@ -210,9 +214,13 @@ object TsBridgeGenerator {
                 if (!jsImplementable) {
                     onSkip("CREATE SKIPPED: $declName — cannot be JS-implemented (${decl.jsImplementabilityGap()}).")
                 }
+                val flowFns = fns.subscribableFlows(instanceBased = true)
                 appendLine()
                 appendLine("export class $declName {")
                 appendLine("  /** @internal */ readonly _handle: string")
+                for (f in flowFns) {
+                    appendLine("  private _${f.flowBaseName}State = { active: false, count: 0 }")
+                }
                 appendLine("  private constructor(handle: string) { this._handle = handle }")
                 appendLine("  /** @internal */")
                 appendLine("  static _wrap(handle: string): $declName { return new $declName(handle) }")
@@ -237,7 +245,7 @@ object TsBridgeGenerator {
                     }
                 }
                 appendLine()
-                appendLine("  destroy(): void { _$declName.destroy(this._handle) }")
+                appendDestroy(declName, flowFns)
                 for (fn in fns) {
                     appendLine()
                     appendInstanceWrapperFunction(fn, declName, enumNames, dataNames, sealedNames, interfaceNames, abstractNames, onSkip)
@@ -285,6 +293,9 @@ object TsBridgeGenerator {
             // 8. Objects — flat const wrapper (unchanged singleton pattern)
             for (obj in objects) {
                 appendLine()
+                for (f in obj.functions.subscribableFlows(instanceBased = false)) {
+                    appendLine("const _${obj.name}_${f.flowBaseName}State = { active: false, count: 0 };")
+                }
                 appendLine("export const ${obj.name} = {")
                 for (fn in obj.functions) {
                     appendWrapperFunction(fn, obj.name, enumNames, dataNames, sealedNames, interfaceNames, abstractNames, onSkip)
@@ -296,6 +307,9 @@ object TsBridgeGenerator {
             for (scope in filescopes) {
                 val sName = scopeName(scope)
                 appendLine()
+                for (f in scope.functions.subscribableFlows(instanceBased = false)) {
+                    appendLine("const _${sName}_${f.flowBaseName}State = { active: false, count: 0 };")
+                }
                 appendLine("export const $sName = {")
                 for (fn in scope.functions) {
                     appendWrapperFunction(fn, sName, enumNames, dataNames, sealedNames, interfaceNames, abstractNames, onSkip)
@@ -398,10 +412,30 @@ object TsBridgeGenerator {
                     val isIface = pRef != null && (pRef.simpleName in interfaceNames || pRef.simpleName in abstractNames)
                     when { !isIface -> p.name; pRef!!.nullable -> "${p.name}?._handle ?? null"; else -> "${p.name}._handle" }
                 }
-                appendLine("  start$cap: ($params): void => $native.start$cap($args),")
-                appendLine("  stop$cap: (): void => $native.stop$cap(),")
-                appendLine("  add${cap}Listener: (handler: (event: { value: $valueType }) => void) =>")
-                appendLine("    $native.addListener('on${cap}Update', handler),")
+                // Ref-counted subscription: the first subscriber starts the native collection,
+                // later ones join the live stream, the last remove() stops it. A terminal event
+                // (error/complete) marks the stream dead so the next subscribe restarts it.
+                val st = "_${moduleName}_${base}State"
+                val paramsPrefix = if (params.isEmpty()) "" else "$params, "
+                appendLine("  subscribe$cap: (${paramsPrefix}handlers: { next: (value: $valueType) => void; error?: (message: string) => void; complete?: () => void }): { remove: () => void } => {")
+                appendLine("    const subs = [")
+                appendLine("      $native.addListener('on${cap}Update', (e: any) => handlers.next(e.value)),")
+                appendLine("      $native.addListener('on${cap}Error', (e: any) => { $st.active = false; handlers.error?.(e.message) }),")
+                appendLine("      $native.addListener('on${cap}Complete', () => { $st.active = false; handlers.complete?.() }),")
+                appendLine("    ]")
+                appendLine("    $st.count++")
+                appendLine("    if (!$st.active) { $native.start$cap($args); $st.active = true }")
+                appendLine("    let removed = false")
+                appendLine("    return {")
+                appendLine("      remove: () => {")
+                appendLine("        if (removed) return")
+                appendLine("        removed = true")
+                appendLine("        subs.forEach(s => s.remove())")
+                appendLine("        $st.count--")
+                appendLine("        if ($st.count === 0 && $st.active) { $native.stop$cap(); $st.active = false }")
+                appendLine("      },")
+                appendLine("    }")
+                appendLine("  },")
             }
         }
     }
@@ -494,15 +528,59 @@ object TsBridgeGenerator {
                     val isIface = pRef != null && (pRef.simpleName in interfaceNames || pRef.simpleName in abstractNames)
                     when { !isIface -> p.name; pRef!!.nullable -> "${p.name}?._handle ?? null"; else -> "${p.name}._handle" }
                 }).joinToString(", ")
+                // Ref-counted subscription, per instance (events filtered by handle): first
+                // subscriber starts the native collection, later ones join the live stream, the
+                // last remove() stops it. Terminal events mark the stream dead for restart.
+                val paramsPrefix = if (params.isEmpty()) "" else "$params, "
                 appendLine()
-                appendLine("  start$cap($params): void { $native.start$cap($args) }")
-                appendLine("  stop$cap(): void { $native.stop$cap(this._handle) }")
-                appendLine("  add${cap}Listener(handler: (event: { value: $valueType }) => void) {")
-                appendLine("    return $native.addListener('on${cap}Update', (e: any) => {")
-                appendLine("      if (e.instanceId === this._handle) handler({ value: e.value })")
-                appendLine("    })")
+                appendLine("  subscribe$cap(${paramsPrefix}handlers: { next: (value: $valueType) => void; error?: (message: string) => void; complete?: () => void }): { remove: () => void } {")
+                appendLine("    const st = this._${base}State")
+                appendLine("    const subs = [")
+                appendLine("      $native.addListener('on${cap}Update', (e: any) => { if (e.instanceId === this._handle) handlers.next(e.value) }),")
+                appendLine("      $native.addListener('on${cap}Error', (e: any) => { if (e.instanceId === this._handle) { st.active = false; handlers.error?.(e.message) } }),")
+                appendLine("      $native.addListener('on${cap}Complete', (e: any) => { if (e.instanceId === this._handle) { st.active = false; handlers.complete?.() } }),")
+                appendLine("    ]")
+                appendLine("    st.count++")
+                appendLine("    if (!st.active) { $native.start$cap($args); st.active = true }")
+                appendLine("    let removed = false")
+                appendLine("    return {")
+                appendLine("      remove: () => {")
+                appendLine("        if (removed) return")
+                appendLine("        removed = true")
+                appendLine("        subs.forEach(s => s.remove())")
+                appendLine("        st.count--")
+                appendLine("        if (st.count === 0 && st.active) { $native.stop$cap(this._handle); st.active = false }")
+                appendLine("      },")
+                appendLine("    }")
                 appendLine("  }")
             }
+        }
+    }
+
+    /**
+     * The flows that get a `subscribe<Base>()` wrapper — mirrors the native emitters' skip
+     * rules (param limit including the synthetic handle, non-String-key maps) so the TS
+     * surface never references a native function that was not generated.
+     */
+    private fun List<KmpFunction>.subscribableFlows(instanceBased: Boolean): List<KmpFunction> =
+        filter {
+            it.kind == FunctionKind.FLOW &&
+                it.params.size + (if (instanceBased) 1 else 0) <= MAX_EXPO_FUNCTION_PARAMS &&
+                !it.usesNonStringKeyMap()
+        }
+
+    /**
+     * Emits `destroy()`, resetting each flow's subscription state first so a subscribe on a
+     * later instance of the same wrapper restarts cleanly instead of assuming a live stream.
+     */
+    private fun StringBuilder.appendDestroy(name: String, flowFns: List<KmpFunction>) {
+        if (flowFns.isEmpty()) {
+            appendLine("  destroy(): void { _$name.destroy(this._handle) }")
+        } else {
+            appendLine("  destroy(): void {")
+            for (f in flowFns) appendLine("    this._${f.flowBaseName}State.active = false")
+            appendLine("    _$name.destroy(this._handle)")
+            appendLine("  }")
         }
     }
 

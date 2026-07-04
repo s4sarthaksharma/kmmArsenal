@@ -353,7 +353,11 @@ object AndroidGenerator {
             .filter { it.params.size + (if (isInstanceBased) 1 else 0) <= MAX_EXPO_FUNCTION_PARAMS }
         val hasSuspend = functions.any { it.kind == FunctionKind.SUSPEND }
         val hasFlows   = flows.isNotEmpty()
-        val eventNames = flows.map { "on${it.flowBaseName.cap()}Update" }
+        // Every flow declares three events: value updates plus the two terminal signals.
+        val eventNames = flows.flatMap { fn ->
+            val Cap = fn.flowBaseName.cap()
+            listOf("on${Cap}Update", "on${Cap}Error", "on${Cap}Complete")
+        }
         val usedEnums  = enumNames.filter { eName -> functions.any { fn -> fn.referencesEnum(eName) } }
         // callTarget: object → type name (singleton), file scope → package name (FQN call), class → unused (uses instance map)
         val callTarget = when {
@@ -382,7 +386,10 @@ object AndroidGenerator {
             imports.add("kotlinx.coroutines.cancel")
             imports.add("kotlinx.coroutines.launch")
         }
-        if (hasFlows) imports.add("kotlinx.coroutines.flow.collect")
+        if (hasFlows) {
+            imports.add("kotlinx.coroutines.CancellationException")
+            imports.add("kotlinx.coroutines.flow.collect")
+        }
         if (isInstanceBased) {
             imports.add("java.util.UUID")
             imports.add("java.util.concurrent.ConcurrentHashMap")
@@ -526,8 +533,10 @@ object AndroidGenerator {
         val hasFlows = flows.isNotEmpty()
         // The call<Fn> reverse-bridge events only exist when a JS implementation can be created.
         val jsImplementable = decl.isJsImplementable()
-        val eventNames = flows.map { "on${it.flowBaseName.cap()}Update" } +
-            (if (jsImplementable) decl.proxiedSuspendFunctions().map { "call${it.name.cap()}" } else emptyList())
+        val eventNames = flows.flatMap { fn ->
+            val Cap = fn.flowBaseName.cap()
+            listOf("on${Cap}Update", "on${Cap}Error", "on${Cap}Complete")
+        } + (if (jsImplementable) decl.proxiedSuspendFunctions().map { "call${it.name.cap()}" } else emptyList())
         val usedEnums = enumNames.filter { eName -> functions.any { fn -> fn.referencesEnum(eName) } }
 
         val imports = mutableSetOf<String>()
@@ -549,7 +558,10 @@ object AndroidGenerator {
         imports.add("kotlinx.coroutines.SupervisorJob")
         imports.add("kotlinx.coroutines.cancel")
         imports.add("kotlinx.coroutines.launch")
-        if (hasFlows) imports.add("kotlinx.coroutines.flow.collect")
+        if (hasFlows) {
+            imports.add("kotlinx.coroutines.CancellationException")
+            imports.add("kotlinx.coroutines.flow.collect")
+        }
         imports.add("java.util.UUID")
         imports.add("java.util.concurrent.ConcurrentHashMap")
 
@@ -579,6 +591,8 @@ object AndroidGenerator {
         sb.appendLine()
         sb.appendLine("  fun get(instanceId: String): Holder =")
         sb.appendLine("    holders[instanceId] ?: error(\"No $name instance for id: \$instanceId\")")
+        sb.appendLine()
+        sb.appendLine("  fun find(instanceId: String): Holder? = holders[instanceId]")
         sb.appendLine()
         sb.appendLine("  fun release(instanceId: String) {")
         sb.appendLine("    holders.remove(instanceId)?.scope?.cancel()")
@@ -930,7 +944,9 @@ object AndroidGenerator {
         val sb        = StringBuilder()
         val base      = fn.flowBaseName
         val Cap       = base.cap()
-        val eventName = "on${Cap}Update"
+        val eventName     = "on${Cap}Update"
+        val errorEvent    = "on${Cap}Error"
+        val completeEvent = "on${Cap}Complete"
         val enumKey   = if (registryName != null) "$registryName.FlowKey.${base.toSnakeUpperCase()}" else "FlowKey.${base.toSnakeUpperCase()}"
         val emit = fn.returnType.toJsElemConversion("value", enumNames, dataClassNames, sealedNames) ?: "value"
         val ownParams = fn.params.joinToString(", ") { "${it.name}: ${it.type.toBridgeParamType(enumNames, interfaceNames, abstractNames, dataClassNames, sealedNames)}" }
@@ -938,20 +954,35 @@ object AndroidGenerator {
         // A Flow-typed property is read as a property access, not a call.
         val invoke    = if (fn.isPropertyGetter) "" else "($callArgs)"
 
+        // Collection body shared by all three branches: values stream as on<Name>Update; a
+        // normal return emits on<Name>Complete, an exception on<Name>Error — exactly one of the
+        // two per started stream. Cancellation (stop/destroy) rethrows and emits neither.
+        fun StringBuilder.appendCollectBody(receiver: String, withInstanceId: Boolean) {
+            val idEntry = if (withInstanceId) "\"instanceId\" to instanceId, " else ""
+            appendLine("        try {")
+            appendLine("          $receiver.${fn.name}$invoke.collect { value ->")
+            appendLine("""            sendEvent("$eventName", mapOf($idEntry"value" to $emit))""")
+            appendLine("          }")
+            appendLine("""          sendEvent("$completeEvent", mapOf(${if (withInstanceId) "\"instanceId\" to instanceId" else ""}))""")
+            appendLine("        } catch (e: CancellationException) {")
+            appendLine("          throw e")
+            appendLine("        } catch (e: Exception) {")
+            appendLine("""          sendEvent("$errorEvent", mapOf($idEntry"message" to (e.message ?: e.toString())))""")
+            appendLine("        }")
+        }
+
         if (registryName != null) {
             val paramList = if (ownParams.isEmpty()) "instanceId: String" else "instanceId: String, $ownParams"
             sb.appendLine("""    Function("start$Cap") { $paramList ->""")
             sb.appendLine("      val holder = $registryName.get(instanceId)")
             sb.appendLine("      holder.flowJobs[$enumKey]?.cancel()")
             sb.appendLine("      holder.flowJobs[$enumKey] = holder.scope.launch {")
-            sb.appendLine("        holder.instance.${fn.name}$invoke.collect { value ->")
-            sb.appendLine("""          sendEvent("$eventName", mapOf("instanceId" to instanceId, "value" to $emit))""")
-            sb.appendLine("        }")
+            sb.appendCollectBody("holder.instance", withInstanceId = true)
             sb.appendLine("      }")
             sb.appendLine("    }")
             sb.appendLine()
             sb.appendLine("""    Function("stop$Cap") { instanceId: String ->""")
-            sb.appendLine("      val holder = $registryName.get(instanceId)")
+            sb.appendLine("      val holder = $registryName.find(instanceId) ?: return@Function")
             sb.appendLine("      holder.flowJobs[$enumKey]?.cancel()")
             sb.appendLine("      holder.flowJobs.remove($enumKey)")
             sb.appendLine("    }")
@@ -961,9 +992,7 @@ object AndroidGenerator {
             sb.appendLine("      val holder = instances[instanceId] ?: error(\"Instance not found: \$instanceId\")")
             sb.appendLine("      holder.flowJobs[$enumKey]?.cancel()")
             sb.appendLine("      holder.flowJobs[$enumKey] = holder.scope.launch {")
-            sb.appendLine("        holder.instance.${fn.name}$invoke.collect { value ->")
-            sb.appendLine("""          sendEvent("$eventName", mapOf("instanceId" to instanceId, "value" to $emit))""")
-            sb.appendLine("        }")
+            sb.appendCollectBody("holder.instance", withInstanceId = true)
             sb.appendLine("      }")
             sb.appendLine("    }")
             sb.appendLine()
@@ -980,9 +1009,7 @@ object AndroidGenerator {
             }
             sb.appendLine("      flowJobs[$enumKey]?.cancel()")
             sb.appendLine("      flowJobs[$enumKey] = scope.launch {")
-            sb.appendLine("        $callTarget.${fn.name}$invoke.collect { value ->")
-            sb.appendLine("""          sendEvent("$eventName", mapOf("value" to $emit))""")
-            sb.appendLine("        }")
+            sb.appendCollectBody(callTarget, withInstanceId = false)
             sb.appendLine("      }")
             sb.appendLine("    }")
             sb.appendLine()

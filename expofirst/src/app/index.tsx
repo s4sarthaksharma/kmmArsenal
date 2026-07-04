@@ -128,12 +128,11 @@ function GreetingTab() {
   const [echoResult, setEchoResult] = useState<string | null>(null);
   const [echoPending, setEchoPending] = useState(false);
   const gRef   = useRef<Greeting | null>(null);
-  const subRef = useRef<ReturnType<Greeting["addCounterListener"]> | null>(null);
+  const subRef = useRef<{ remove: () => void } | null>(null);
 
   useEffect(() => {
     gRef.current = Greeting.create();
     return () => {
-      gRef.current?.stopCounter();
       subRef.current?.remove();
       gRef.current?.destroy();
       gRef.current = null;
@@ -144,12 +143,10 @@ function GreetingTab() {
     const g = gRef.current;
     if (!g) return;
     if (counting) {
-      g.stopCounter();
-      subRef.current?.remove();
+      subRef.current?.remove(); subRef.current = null;
       setCounting(false);
     } else {
-      g.startCounter();
-      subRef.current = g.addCounterListener(e => setCount(e.value));
+      subRef.current = g.subscribeCounter({ next: v => setCount(v) });
       setCounting(true);
     }
   };
@@ -345,16 +342,16 @@ function TickerServiceTab() {
   const [pulse, setPulse]   = useState(false);
   const [pulseOn, setPulseOn] = useState(false);
   const tsRef    = useRef<TickerService | null>(null);
-  const secSub   = useRef<ReturnType<TickerService["addSecondsListener"]> | null>(null);
-  const statSub  = useRef<ReturnType<TickerService["addStatusListener"]>  | null>(null);
-  const pulseSub = useRef<ReturnType<TickerService["addPulseListener"]>   | null>(null);
+  const secSub   = useRef<{ remove: () => void } | null>(null);
+  const statSub  = useRef<{ remove: () => void } | null>(null);
+  const pulseSub = useRef<{ remove: () => void } | null>(null);
 
   useEffect(() => {
     tsRef.current = TickerService.create();
     return () => {
-      tsRef.current?.stopSeconds(); secSub.current?.remove();
-      tsRef.current?.stopStatus();  statSub.current?.remove();
-      tsRef.current?.stopPulse();   pulseSub.current?.remove();
+      secSub.current?.remove();
+      statSub.current?.remove();
+      pulseSub.current?.remove();
       tsRef.current?.destroy();
       tsRef.current = null;
     };
@@ -363,20 +360,20 @@ function TickerServiceTab() {
   const toggleSec = () => {
     const ts = tsRef.current;
     if (!ts) return;
-    if (secOn) { ts.stopSeconds(); secSub.current?.remove(); setSecOn(false); }
-    else { ts.startSeconds(); secSub.current = ts.addSecondsListener(e => setSec(e.value)); setSecOn(true); }
+    if (secOn) { secSub.current?.remove(); secSub.current = null; setSecOn(false); }
+    else { secSub.current = ts.subscribeSeconds({ next: v => setSec(v) }); setSecOn(true); }
   };
   const toggleStat = () => {
     const ts = tsRef.current;
     if (!ts) return;
-    if (statOn) { ts.stopStatus(); statSub.current?.remove(); setStatOn(false); }
-    else { ts.startStatus(); statSub.current = ts.addStatusListener(e => setStat(e.value)); setStatOn(true); }
+    if (statOn) { statSub.current?.remove(); statSub.current = null; setStatOn(false); }
+    else { statSub.current = ts.subscribeStatus({ next: v => setStat(v) }); setStatOn(true); }
   };
   const togglePulse = () => {
     const ts = tsRef.current;
     if (!ts) return;
-    if (pulseOn) { ts.stopPulse(); pulseSub.current?.remove(); setPulseOn(false); }
-    else { ts.startPulse(); pulseSub.current = ts.addPulseListener(e => setPulse(e.value)); setPulseOn(true); }
+    if (pulseOn) { pulseSub.current?.remove(); pulseSub.current = null; setPulseOn(false); }
+    else { pulseSub.current = ts.subscribePulse({ next: v => setPulse(v) }); setPulseOn(true); }
   };
 
   return (
@@ -417,12 +414,11 @@ function TrafficLightTab() {
   const [flowColor, setFlowColor]   = useState<LightColor | null>(null);
   const [flowOn, setFlowOn]         = useState(false);
   const tlRef   = useRef<TrafficLight | null>(null);
-  const flowSub = useRef<ReturnType<TrafficLight["addColorListener"]> | null>(null);
+  const flowSub = useRef<{ remove: () => void } | null>(null);
 
   useEffect(() => {
     tlRef.current = TrafficLight.create();
     return () => {
-      tlRef.current?.stopColor();
       flowSub.current?.remove();
       tlRef.current?.destroy();
       tlRef.current = null;
@@ -432,10 +428,9 @@ function TrafficLightTab() {
   const toggleFlow = () => {
     const tl = tlRef.current;
     if (!tl) return;
-    if (flowOn) { tl.stopColor(); flowSub.current?.remove(); setFlowOn(false); }
+    if (flowOn) { flowSub.current?.remove(); flowSub.current = null; setFlowOn(false); }
     else {
-      tl.startColor();
-      flowSub.current = tl.addColorListener(e => setFlowColor(e.value));
+      flowSub.current = tl.subscribeColor({ next: v => setFlowColor(v) });
       setFlowOn(true);
     }
   };
@@ -520,17 +515,22 @@ function FixtureTab() {
   // Flow — observeStatus
   const [status,   setStatus]   = useState<string | null>(null);
   const [statusOn, setStatusOn] = useState(false);
-  const statusSub = useRef<ReturnType<FixtureAsyncApi["addObserveStatusListener"]> | null>(null);
+  const statusSub = useRef<{ remove: () => void } | null>(null);
 
   // Flow — observeUser
   const [liveUser,   setLiveUser]   = useState<FixtureUser | null>(null);
   const [liveUserOn, setLiveUserOn] = useState(false);
-  const liveUserSub = useRef<ReturnType<FixtureAsyncApi["addObserveUserListener"]> | null>(null);
+  const liveUserSub = useRef<{ remove: () => void } | null>(null);
 
   // Flow — observeResult
   const [result,   setResult]   = useState<FixtureResult | null>(null);
   const [resultOn, setResultOn] = useState(false);
-  const resultSub = useRef<ReturnType<FixtureAsyncApi["addObserveResultListener"]> | null>(null);
+  const resultSub = useRef<{ remove: () => void } | null>(null);
+
+  // Flow — observeFailing (error termination)
+  const [failVal,   setFailVal]   = useState<number | string | null>(null);
+  const [failOn,    setFailOn]    = useState(false);
+  const failSub = useRef<{ remove: () => void } | null>(null);
 
   // Object — FixtureAnalytics
   const [tracked,      setTracked]      = useState<string  | null>(null);
@@ -538,7 +538,7 @@ function FixtureTab() {
   const [flushPending, setFlushPending] = useState(false);
   const [event,        setEvent]        = useState<string  | null>(null);
   const [eventsOn,     setEventsOn]     = useState(false);
-  const eventSub = useRef<ReturnType<typeof FixtureAnalytics.addEventsListener> | null>(null);
+  const eventSub = useRef<{ remove: () => void } | null>(null);
 
   // File-scope — BridgeTypeFixture (no create/destroy, direct calls)
   const [fsGreet,       setFsGreet]       = useState<string  | null>(null);
@@ -554,9 +554,17 @@ function FixtureTab() {
   const [fsStatusOn,    setFsStatusOn]    = useState(false);
   const [fsNullStr,     setFsNullStr]     = useState<string | null | undefined>(undefined);
   const [fsNullStrOn,   setFsNullStrOn]   = useState(false);
-  const fsCounterSub = useRef<ReturnType<typeof BridgeTypeFixture.addFixtureObserveCounterListener> | null>(null);
-  const fsStatusSub  = useRef<ReturnType<typeof BridgeTypeFixture.addFixtureObserveStatusListener>  | null>(null);
-  const fsNullStrSub = useRef<ReturnType<typeof BridgeTypeFixture.addFixtureObserveNullableStringListener> | null>(null);
+  const fsCounterSub = useRef<{ remove: () => void } | null>(null);
+  const fsStatusSub  = useRef<{ remove: () => void } | null>(null);
+  const fsNullStrSub = useRef<{ remove: () => void } | null>(null);
+
+  // File-scope flow terminations — failing (error) and finite (complete) streams
+  const [failStream,   setFailStream]   = useState<number | string | null>(null);
+  const [failStreamOn, setFailStreamOn] = useState(false);
+  const failStreamSub  = useRef<{ remove: () => void } | null>(null);
+  const [finStream,    setFinStream]    = useState<number | string | null>(null);
+  const [finStreamOn,  setFinStreamOn]  = useState(false);
+  const finStreamSub   = useRef<{ remove: () => void } | null>(null);
 
   // Generics — FixtureGenericApi<T> (runtime __toWire conversion + caller-asserted T)
   const [genUser,         setGenUser]         = useState<FixtureUser | null>(null);
@@ -566,7 +574,7 @@ function FixtureTab() {
   const [genFetchPending, setGenFetchPending] = useState(false);
   const [genObs,          setGenObs]          = useState<string | null>(null);
   const [genObsOn,        setGenObsOn]        = useState(false);
-  const genObsSub  = useRef<ReturnType<FixtureGenericApi<string>["addObserveListener"]> | null>(null);
+  const genObsSub  = useRef<{ remove: () => void } | null>(null);
   const genStrRef  = useRef<FixtureGenericApi<string> | null>(null);
   const genUserRef = useRef<FixtureGenericApi<FixtureUser> | null>(null);
 
@@ -579,14 +587,17 @@ function FixtureTab() {
     genStrRef.current  = FixtureGenericApi.create<string>();
     genUserRef.current = FixtureGenericApi.create<FixtureUser>();
     return () => {
-      asyncRef.current?.stopObserveStatus();  statusSub.current?.remove();
-      asyncRef.current?.stopObserveUser();    liveUserSub.current?.remove();
-      asyncRef.current?.stopObserveResult();  resultSub.current?.remove();
-      FixtureAnalytics.stopEvents();          eventSub.current?.remove();
-      BridgeTypeFixture.stopFixtureObserveCounter();       fsCounterSub.current?.remove();
-      BridgeTypeFixture.stopFixtureObserveStatus();        fsStatusSub.current?.remove();
-      BridgeTypeFixture.stopFixtureObserveNullableString(); fsNullStrSub.current?.remove();
-      genStrRef.current?.stopObserve();       genObsSub.current?.remove();
+      statusSub.current?.remove();
+      liveUserSub.current?.remove();
+      resultSub.current?.remove();
+      failSub.current?.remove();
+      eventSub.current?.remove();
+      fsCounterSub.current?.remove();
+      fsStatusSub.current?.remove();
+      fsNullStrSub.current?.remove();
+      failStreamSub.current?.remove();
+      finStreamSub.current?.remove();
+      genObsSub.current?.remove();
       primRef.current?.destroy();             primRef.current  = null;
       asyncRef.current?.destroy();            asyncRef.current = null;
       genStrRef.current?.destroy();           genStrRef.current  = null;
@@ -598,10 +609,9 @@ function FixtureTab() {
     const api = asyncRef.current;
     if (!api) return;
     if (statusOn) {
-      api.stopObserveStatus(); statusSub.current?.remove(); setStatusOn(false);
+      statusSub.current?.remove(); statusSub.current = null; setStatusOn(false);
     } else {
-      api.startObserveStatus();
-      statusSub.current = api.addObserveStatusListener(e => setStatus(e.value));
+      statusSub.current = api.subscribeObserveStatus({ next: v => setStatus(v) });
       setStatusOn(true);
     }
   };
@@ -610,10 +620,9 @@ function FixtureTab() {
     const api = asyncRef.current;
     if (!api) return;
     if (liveUserOn) {
-      api.stopObserveUser(); liveUserSub.current?.remove(); setLiveUserOn(false);
+      liveUserSub.current?.remove(); liveUserSub.current = null; setLiveUserOn(false);
     } else {
-      api.startObserveUser();
-      liveUserSub.current = api.addObserveUserListener(e => setLiveUser(e.value));
+      liveUserSub.current = api.subscribeObserveUser({ next: v => setLiveUser(v) });
       setLiveUserOn(true);
     }
   };
@@ -622,48 +631,86 @@ function FixtureTab() {
     const api = asyncRef.current;
     if (!api) return;
     if (resultOn) {
-      api.stopObserveResult(); resultSub.current?.remove(); setResultOn(false);
+      resultSub.current?.remove(); resultSub.current = null; setResultOn(false);
     } else {
-      api.startObserveResult();
-      resultSub.current = api.addObserveResultListener(e => setResult(e.value));
+      resultSub.current = api.subscribeObserveResult({ next: v => setResult(v) });
       setResultOn(true);
+    }
+  };
+
+  const toggleFail = () => {
+    const api = asyncRef.current;
+    if (!api) return;
+    if (failOn) {
+      failSub.current?.remove(); failSub.current = null; setFailOn(false);
+    } else {
+      setFailVal(null);
+      failSub.current = api.subscribeObserveFailing({
+        next:     v => setFailVal(v),
+        error:    m => { setFailVal(`ERROR: ${m}`); setFailOn(false); },
+        complete: () => { setFailVal("completed"); setFailOn(false); },
+      });
+      setFailOn(true);
     }
   };
 
   const toggleFsCounter = () => {
     if (fsCounterOn) {
-      BridgeTypeFixture.stopFixtureObserveCounter(); fsCounterSub.current?.remove(); setFsCounterOn(false);
+      fsCounterSub.current?.remove(); fsCounterSub.current = null; setFsCounterOn(false);
     } else {
-      BridgeTypeFixture.startFixtureObserveCounter();
-      fsCounterSub.current = BridgeTypeFixture.addFixtureObserveCounterListener(e => setFsCounter(e.value));
+      fsCounterSub.current = BridgeTypeFixture.subscribeFixtureObserveCounter({ next: v => setFsCounter(v) });
       setFsCounterOn(true);
     }
   };
   const toggleFsStatus = () => {
     if (fsStatusOn) {
-      BridgeTypeFixture.stopFixtureObserveStatus(); fsStatusSub.current?.remove(); setFsStatusOn(false);
+      fsStatusSub.current?.remove(); fsStatusSub.current = null; setFsStatusOn(false);
     } else {
-      BridgeTypeFixture.startFixtureObserveStatus();
-      fsStatusSub.current = BridgeTypeFixture.addFixtureObserveStatusListener(e => setFsStatus(e.value));
+      fsStatusSub.current = BridgeTypeFixture.subscribeFixtureObserveStatus({ next: v => setFsStatus(v) });
       setFsStatusOn(true);
     }
   };
   const toggleFsNullStr = () => {
     if (fsNullStrOn) {
-      BridgeTypeFixture.stopFixtureObserveNullableString(); fsNullStrSub.current?.remove(); setFsNullStrOn(false);
+      fsNullStrSub.current?.remove(); fsNullStrSub.current = null; setFsNullStrOn(false);
     } else {
-      BridgeTypeFixture.startFixtureObserveNullableString();
-      fsNullStrSub.current = BridgeTypeFixture.addFixtureObserveNullableStringListener(e => setFsNullStr(e.value));
+      fsNullStrSub.current = BridgeTypeFixture.subscribeFixtureObserveNullableString({ next: v => setFsNullStr(v) });
       setFsNullStrOn(true);
+    }
+  };
+
+  const toggleFailStream = () => {
+    if (failStreamOn) {
+      failStreamSub.current?.remove(); failStreamSub.current = null; setFailStreamOn(false);
+    } else {
+      setFailStream(null);
+      failStreamSub.current = BridgeTypeFixture.subscribeFixtureFailingStream({
+        next:     v => setFailStream(v),
+        error:    m => { setFailStream(`ERROR: ${m}`); setFailStreamOn(false); },
+        complete: () => { setFailStream("completed"); setFailStreamOn(false); },
+      });
+      setFailStreamOn(true);
+    }
+  };
+  const toggleFinStream = () => {
+    if (finStreamOn) {
+      finStreamSub.current?.remove(); finStreamSub.current = null; setFinStreamOn(false);
+    } else {
+      setFinStream(null);
+      finStreamSub.current = BridgeTypeFixture.subscribeFixtureFiniteStream({
+        next:     v => setFinStream(v),
+        error:    m => { setFinStream(`ERROR: ${m}`); setFinStreamOn(false); },
+        complete: () => { setFinStream("completed ✓"); setFinStreamOn(false); },
+      });
+      setFinStreamOn(true);
     }
   };
 
   const toggleEvents = () => {
     if (eventsOn) {
-      FixtureAnalytics.stopEvents(); eventSub.current?.remove(); setEventsOn(false);
+      eventSub.current?.remove(); eventSub.current = null; setEventsOn(false);
     } else {
-      FixtureAnalytics.startEvents();
-      eventSub.current = FixtureAnalytics.addEventsListener(e => setEvent(e.value));
+      eventSub.current = FixtureAnalytics.subscribeEvents({ next: v => setEvent(v) });
       setEventsOn(true);
     }
   };
@@ -741,6 +788,11 @@ function FixtureTab() {
         {result != null && <JsonRow value={result} />}
       </FnCard>
 
+      <FnCard name="observeFailing(): Flow<Int>  [instance flow, throws after 2]">
+        <Btn label={failOn ? "Stop" : "Start"} onPress={toggleFail} muted={failOn} />
+        {failVal != null && <ReplyRow value={failVal} live={failOn} />}
+      </FnCard>
+
       {/* ── FixtureAnalytics (object singleton) ───────────── */}
       <Text style={s.section}>FixtureAnalytics (object singleton)</Text>
 
@@ -816,6 +868,16 @@ function FixtureTab() {
         {fsNullStr !== undefined && <ReplyRow value={`→ ${fsNullStr}`} live={fsNullStrOn} />}
       </FnCard>
 
+      <FnCard name="fixtureFailingStream(): Flow<Int>  [throws after 2 → error handler]">
+        <Btn label={failStreamOn ? "Stop" : "Start"} onPress={toggleFailStream} muted={failStreamOn} />
+        {failStream != null && <ReplyRow value={failStream} live={failStreamOn} />}
+      </FnCard>
+
+      <FnCard name="fixtureFiniteStream(): Flow<Int>  [3 values → complete handler]">
+        <Btn label={finStreamOn ? "Stop" : "Start"} onPress={toggleFinStream} muted={finStreamOn} />
+        {finStream != null && <ReplyRow value={finStream} live={finStreamOn} />}
+      </FnCard>
+
       {/* ── FixtureGenericApi<T> — generics ────────────────── */}
       <Text style={s.section}>FixtureGenericApi&lt;T&gt; — generics</Text>
 
@@ -853,10 +915,9 @@ function FixtureTab() {
           muted={genObsOn}
           onPress={() => {
             if (genObsOn) {
-              genStrRef.current?.stopObserve(); genObsSub.current?.remove(); setGenObsOn(false);
+              genObsSub.current?.remove(); genObsSub.current = null; setGenObsOn(false);
             } else {
-              genStrRef.current?.startObserve();
-              genObsSub.current = genStrRef.current?.addObserveListener(e => setGenObs(e.value)) ?? null;
+              genObsSub.current = genStrRef.current?.subscribeObserve({ next: v => setGenObs(v) }) ?? null;
               setGenObsOn(true);
             }
           }}

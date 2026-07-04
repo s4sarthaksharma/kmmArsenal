@@ -357,6 +357,15 @@ class FixtureAsyncApi {
             delay(2_000)
         }
     }
+
+    /** Instance-based (holder branch) throwing flow — errors after two emissions. */
+    fun observeFailing(): Flow<Int> = flow {
+        emit(1)
+        delay(500)
+        emit(2)
+        delay(500)
+        throw IllegalStateException("async api flow failure")
+    }
 }
 
 // ── Concrete class — data/sealed/collection function parameters ───────────────
@@ -487,6 +496,20 @@ fun fixtureObserveStatus(): Flow<FixtureStatus> = flow {
 fun fixtureObserveNullableString(): Flow<String?> = flow {
     var i = 0
     while (true) { emit(if (i % 2 == 0) "value_$i" else null); i++; delay(1_000) }
+}
+
+/** Throws after two emissions — exercises the on<Name>Error termination event. */
+fun fixtureFailingStream(): Flow<Int> = flow {
+    emit(1)
+    delay(500)
+    emit(2)
+    delay(500)
+    throw IllegalStateException("fixture flow failure")
+}
+
+/** Completes normally after three emissions — exercises the on<Name>Complete event. */
+fun fixtureFiniteStream(): Flow<Int> = flow {
+    for (i in 1..3) { emit(i); delay(500) }
 }
 
 // ── Interface/abstract return type fixture ─────────────────────────────────

@@ -64,7 +64,7 @@ What each Kotlin type becomes **on the wire** (the value that actually crosses t
 | `interface` / `abstract class` | `<Name>Registry` (id-keyed holders) | `_instances` static map | wrapper class; JS-implementable via `create(...)` + `call<Fn>` events + `resolve<Fn>` | sync members can't be JS-implemented |
 | `List<T>` / `Set<T>` | `List<wire(T)>` | `[wire(T)]` | `wire(T)[]` | Sets become JS arrays; converted back with `.toSet()` |
 | `Map<String, V>` | `Map<String, wire(V)>` | `[String: wire(V)]` | `{ [key: string]: wire(V) }` | **non-String keys are skipped loudly** |
-| `Flow<T>` (return/property) | `start<Name>`/`stop<Name>` + `on<Name>Update` event | same (SKIE `for await`) | `start…`/`stop…`/`add…Listener` | element converted like a return value |
+| `Flow<T>` (return/property) | `start<Name>`/`stop<Name>` + `on<Name>Update`/`Error`/`Complete` events | same (ObjC `collect` via `__FlowCollector`) | ref-counted `subscribe<Name>({next, error?, complete?})` | element converted like a return value; error/complete are terminal |
 | `suspend fun` | `AsyncFunction` + `launchSettled` | `AsyncFunction` + `Task` | `Promise<…>` | promise settles exactly once, incl. on `destroy()` |
 | generic `T` (erased position) | `Any` + runtime `__toWire(value)` | `Any` + runtime `__toWire(value)` | real generic `T` via `create<T>()` | see limitations below |
 
@@ -105,7 +105,9 @@ functions whose param/return types have no Swift bridge representation.
 - **Generic `T` parameters** *into* KMP pass through unconverted — primitives work, records don't.
 - **iOS `__toWire`** can only convert record types declared in the same source file
   (Swift codecs are `fileprivate`).
-- **Flow errors** are not propagated to JS (no `on<Name>Error` event yet). Plan T4.
 - Registry/instance maps grow until `destroy()` is called — no automatic GC hook yet. Plan T5.
+- **`StateFlow`/`SharedFlow`-typed returns** would not compile on iOS: the error-aware collect
+  path converts via `SkieKotlinFlow(...)`, which only accepts plain `SkieSwiftFlow`. Plain
+  `Flow<T>` (all current fixtures) is fine.
 - Flow function names merely *ending* in "flow" get that suffix stripped case-insensitively
   (`overflow` → `over`) — avoid such names.
