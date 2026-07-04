@@ -17,7 +17,7 @@ drive everything: **JS has no Set** (Sets become arrays), and **JS object keys a
 | `Map<String, V>` | `Map<String, wire(V)>` | `[String: wire(V)]` | `{ [key: string]: wire(V) }` | values converted; keys must be String |
 | `List<*>` / `Map<*,*>` | `List<Any?>` / `Map` | `[Any]` / `[…]` | `unknown[]` / `{[key:string]:unknown}` | star → `unknown`/`Any` |
 | `List<out T>` | same as `List<T>` | same | same | variance ignored (read via `typeOrNull()`) |
-| `Map<Int, V>` | **skipped** | ⚠️ emitted (see §7) | **skipped** | non-String key |
+| `Map<Int, V>` | **skipped** | **skipped** | **skipped** | non-String key — skipped on all three |
 
 ## 1 · Kotlin source
 
@@ -79,6 +79,9 @@ Function("starMap") { instanceId: String ->
 // BRIDGE SKIPPED: badMap() — Map with non-String keys is not bridgeable (JS objects are string-keyed).
 ```
 
+Swift and TS emit the identical skip (`>> [iOS]` / `>> [TS] FUNCTION SKIPPED: … Map with
+non-String keys …`) — the `usesNonStringKeyMap()` check runs in all three generators.
+
 ## 4 · SwiftGenerator
 
 Same element-wise shape (`.map`/`.mapValues`), with SKIE's primitive unboxing where element
@@ -131,7 +134,7 @@ A populated `getUserMap` would put a plain nested object on the wire:
 
 | Situation | Behavior |
 |---|---|
-| `Map<Int, String>` (`badMap`) | **Divergence:** Android + TS skip it loudly (`usesNonStringKeyMap()`); **Swift currently emits it** (`isSwiftBridgeable` doesn't apply the non-String-key check). It compiles as `[Int32: String]` but Expo cannot bridge a non-string-keyed dictionary to JS — so calling it from JS misbehaves at runtime. Treat non-String-key maps as unsupported regardless of the Swift output. Worth a generator fix (mirror the check into `isSwiftBridgeable`). |
+| `Map<Int, String>` (`badMap`) | Skipped loudly on **all three** platforms (`usesNonStringKeyMap()` — the Swift check was added so it matches Android/TS instead of emitting an unbridgeable `[Int32: String]`). |
 | `Set` | always an array on the wire; order not guaranteed; duplicates collapse on the inbound `.toSet()` |
 | star `List<*>`/`Map<*,*>` | elements cross as `Any?`/`unknown` — no conversion, no type safety |
 | variance (`in`/`out`) | ignored — bridges identically to the invariant form |

@@ -78,6 +78,7 @@ object SwiftGenerator {
                 if (!fn.isBridgeable(enumNames, dataNames, sealedNames, extraParams = extraParams, interfaceNames = interfaceNames, abstractNames = abstractNames)) {
                     val reason = when {
                         fn.params.size + extraParams > MAX_EXPO_FUNCTION_PARAMS -> "too many params (${fn.params.size} > ${MAX_EXPO_FUNCTION_PARAMS - extraParams})"
+                        fn.usesNonStringKeyMap() -> "Map with non-String keys is not bridgeable (JS objects are string-keyed)"
                         !fn.returnType.isSwiftBridgeable(enumNames, dataNames, sealedNames, interfaceNames, abstractNames) -> "unbridgeable return type"
                         else -> "unbridgeable param type"
                     }
@@ -1254,6 +1255,9 @@ object SwiftGenerator {
         abstractNames: Set<String> = emptySet(),
     ): Boolean {
         if (params.size + extraParams > MAX_EXPO_FUNCTION_PARAMS) return false
+        // JS object keys are strings — a Map with non-String keys cannot cross the bridge.
+        // Skip it, matching Android/TS (a Swift [Int32: String] compiles but Expo can't bridge it).
+        if (usesNonStringKeyMap()) return false
         if (!returnType.isSwiftBridgeable(enumNames, dataNames, sealedNames, interfaceNames, abstractNames)) return false
         return params.all { it.type.isSwiftBridgeable(enumNames, dataNames, sealedNames, interfaceNames, abstractNames) }
     }
