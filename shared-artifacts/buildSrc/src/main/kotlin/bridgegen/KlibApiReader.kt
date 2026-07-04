@@ -261,6 +261,7 @@ object KlibApiReader {
                     packageName = pkg,
                     variants    = variants,
                     functions   = readFunctions(cls, nr, tt, context = name, onSkip = onSkip),
+                    isFromInterface = kind == ProtoBuf.Class.Kind.INTERFACE,
                 )
             }
 

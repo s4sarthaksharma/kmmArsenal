@@ -177,16 +177,17 @@ object SwiftGenerator {
         appendLine("}")
         appendLine()
 
-        val needsThrows = decl.fields.any { f ->
-            val t = f.type
-            t is KmpTypeRef.ClassRef && (t.simpleName in enumNames || t.simpleName in dataNames || t.simpleName in sealedNames)
+        val conversions = decl.fields.map { field ->
+            field.name to field.type.toKmpConversionWithPrefix(field.name, enumNames, dataNames, sealedNames)
         }
+        // throws exactly when any field conversion emits a `try` — keeps signature and body in sync
+        val needsThrows = conversions.any { (_, conv) -> conv.first.isNotEmpty() }
         appendLine("fileprivate extension ${n}Record {")
         appendLine("  func toKmp() ${if (needsThrows) "throws " else ""}-> $n {")
         appendLine("    return $n(")
-        for (field in decl.fields) {
-            val (prefix, arg) = field.type.toKmpConversionWithPrefix(field.name, enumNames, dataNames, sealedNames)
-            appendLine("      ${field.name}: ${prefix}$arg,")
+        for ((fieldName, conv) in conversions) {
+            val (prefix, arg) = conv
+            appendLine("      $fieldName: ${prefix}$arg,")
         }
         appendLine("    )")
         appendLine("  }")
@@ -267,8 +268,13 @@ object SwiftGenerator {
         appendLine("    switch type {")
         for (variant in decl.variants) {
             val vName      = variant.variantName()
-            // Top-level (non-nested) variants surface as bare Swift types, not Parent.Variant.
-            val vRef       = if (variant.isNestedVariant) "$n.$vName" else vName
+            // Top-level (non-nested) variants surface as bare Swift types. Nested variants of a
+            // sealed INTERFACE surface concatenated (ObjC protocols cannot nest types).
+            val vRef       = when {
+                !variant.isNestedVariant -> vName
+                decl.isFromInterface     -> "$n$vName"
+                else                     -> "$n.$vName"
+            }
             val fields     = variant.variantFields()
             val isAbstract = (variant as? KmpVariant.ClassVariant)?.isAbstract ?: false
             appendLine("    case \"$vName\":")
@@ -562,18 +568,20 @@ object SwiftGenerator {
                         appendLine("  }")
                     }
                     FunctionKind.SUSPEND -> {
-                        val nativeRetT = fn.returnType.toSwiftNativeType(enumNames, dataNames, sealedNames)
+                        val (completionT, valueExpr) = fn.returnType.toSwiftCompletionContract(enumNames, dataNames, sealedNames)
                         val eventName  = "call${fn.name.cap()}"
                         val paramMap   = buildString {
                             append(""""instanceId": instanceId, "callId": callId""")
                             for (p in fn.params) append(""", "${p.name}": ${p.name}""")
                         }
                         // SKIE renames the ObjC completion handler form with __ prefix in Swift.
-                        // Overriding it tells ObjC dispatch to use our implementation.
-                        appendLine("  override func __${fn.name}($pListNative, completionHandler: @escaping ($nativeRetT?, Error?) -> Void) {")
+                        // Overriding it tells ObjC dispatch to use our implementation. The
+                        // completion value uses Kotlin/Native's boxed types (KotlinInt etc.).
+                        val ownParams = if (fn.params.isEmpty()) "" else "$pListNative, "
+                        appendLine("  override func __${fn.name}(${ownParams}completionHandler: @escaping ($completionT?, Error?) -> Void) {")
                         appendLine("    let callId = UUID().uuidString")
                         appendLine("    ${name}Module._pendingCalls[callId] = { value, error in")
-                        appendLine("      completionHandler(value as? $nativeRetT, error)")
+                        appendLine("      completionHandler($valueExpr, error)")
                         appendLine("    }")
                         appendLine("    emit(\"$eventName\", [$paramMap])")
                         appendLine("  }")
@@ -625,19 +633,23 @@ object SwiftGenerator {
                         appendLine("  }")
                     }
                     FunctionKind.SUSPEND -> {
-                        val nativeRetT = fn.returnType.toSwiftNativeType(enumNames, dataNames, sealedNames)
+                        val (completionT, valueExpr) = fn.returnType.toSwiftCompletionContract(enumNames, dataNames, sealedNames)
                         val eventName  = "call${fn.name.cap()}"
                         val paramMap   = buildString {
                             append(""""instanceId": instanceId, "callId": callId""")
                             for (p in fn.params) append(""", "${p.name}": ${p.name}""")
                         }
-                        val selector = fn.name + fn.params.joinToString("") { it.name.cap() + ":" } + "completionHandler:"
+                        // Kotlin/Native selector: a zero-arg suspend appends "With"; params appear
+                        // as capitalized labels. Completion values use K/N's boxed types.
+                        val selector = if (fn.params.isEmpty()) "${fn.name}WithCompletionHandler:"
+                            else fn.name + fn.params.joinToString("") { it.name.cap() + ":" } + "completionHandler:"
                         val pListObjc = fn.params.joinToString(", ") { "_ ${it.name}: ${it.type.toSwiftNativeType(enumNames, dataNames, sealedNames)}" }
+                        val ownParams = if (fn.params.isEmpty()) "" else "$pListObjc, "
                         appendLine("  @objc($selector)")
-                        appendLine("  func ${fn.name}_cb($pListObjc, completionHandler: @escaping ($nativeRetT?, NSError?) -> Void) {")
+                        appendLine("  func ${fn.name}_cb(${ownParams}completionHandler: @escaping ($completionT?, NSError?) -> Void) {")
                         appendLine("    let callId = UUID().uuidString")
                         appendLine("    ${name}Module._pendingCalls[callId] = { value, error in")
-                        appendLine("      completionHandler(value as? $nativeRetT, error.map { \$0 as NSError })")
+                        appendLine("      completionHandler($valueExpr, error.map { \$0 as NSError })")
                         appendLine("    }")
                         appendLine("    emit(\"$eventName\", [$paramMap])")
                         appendLine("  }")
@@ -804,6 +816,37 @@ object SwiftGenerator {
 
     // ── Swift native type (SKIE-transformed, no framework prefix) ────────────
     // SKIE drops the "Shared" framework prefix — types use their Kotlin simple name directly
+    /**
+     * The completion-handler value type for a suspend method implemented via the ObjC bridge,
+     * paired with the expression converting the resolved `Any?` value into it.
+     *
+     * Kotlin/Native boxes primitives in completion handlers (`SharedInt` → Swift `KotlinInt`
+     * etc.) because the block parameter must be nilable — a bare `Int32?` is not representable
+     * in Objective-C. The value expression converts from what `resolve<Fn>` stored (the Swift
+     * bridge type) into the boxed form.
+     */
+    private fun KmpTypeRef.toSwiftCompletionContract(
+        enumNames: Set<String>,
+        dataNames: Set<String>,
+        sealedNames: Set<String>,
+    ): Pair<String, String> = when {
+        this is KmpTypeRef.Primitive -> when (kind) {
+            PrimitiveKind.STRING  -> "String"        to "value as? String"
+            PrimitiveKind.BOOLEAN -> "KotlinBoolean" to "(value as? Bool).map { KotlinBoolean(bool: \$0) }"
+            PrimitiveKind.INT     -> "KotlinInt"     to "(value as? Int32).map { KotlinInt(int: \$0) }"
+            PrimitiveKind.LONG    -> "KotlinLong"    to "(value as? Double).map { KotlinLong(longLong: Int64(\$0)) }"
+            PrimitiveKind.DOUBLE  -> "KotlinDouble"  to "(value as? Double).map { KotlinDouble(double: \$0) }"
+            PrimitiveKind.FLOAT   -> "KotlinFloat"   to "(value as? Float).map { KotlinFloat(float: \$0) }"
+            PrimitiveKind.BYTE    -> "KotlinByte"    to "(value as? Int32).map { KotlinByte(char: Int8(\$0)) }"
+            PrimitiveKind.SHORT   -> "KotlinShort"   to "(value as? Int32).map { KotlinShort(short: Int16(\$0)) }"
+            PrimitiveKind.CHAR    -> "AnyObject"     to "value as AnyObject?"
+        }
+        else -> {
+            val t = toSwiftNativeType(enumNames, dataNames, sealedNames).trimEnd('?')
+            t to "value as? $t"
+        }
+    }
+
     private fun KmpTypeRef.toSwiftNativeType(
         enumNames: Set<String>,
         dataNames: Set<String>,
@@ -882,7 +925,7 @@ object SwiftGenerator {
         val throwsClause = if (fn.needsThrows(enumNames, dataNames, sealedNames)) " throws" else ""
         appendLine("""    Function("${fn.name}") { ($paramList)$throwsClause in""")
         appendLine("      guard let inst = Self._instances[instanceId] else { fatalError(\"Instance not found: \\(instanceId)\") }")
-        val rawCall    = "inst.${fn.name}(${if (fn.params.isEmpty()) "" else callArgs})"
+        val rawCall    = "inst.${fn.name.toSwiftMemberName()}(${if (fn.params.isEmpty()) "" else callArgs})"
         val returnExpr = fn.returnType.wrapReturnExpr(rawCall, enumNames, dataNames, sealedNames, interfaceNames, abstractNames)
         appendLine("      return $returnExpr")
         appendLine("    }")
@@ -907,7 +950,7 @@ object SwiftGenerator {
         val throwsClause = if (fn.needsThrows(enumNames, dataNames, sealedNames)) " throws" else ""
         appendLine("""    AsyncFunction("${fn.name}") { ($paramList)$throwsClause in""")
         appendLine("      guard let inst = Self._instances[instanceId] else { fatalError(\"Instance not found: \\(instanceId)\") }")
-        val rawCall    = "inst.${fn.name}(${if (fn.params.isEmpty()) "" else callArgs})"
+        val rawCall    = "inst.${fn.name.toSwiftMemberName()}(${if (fn.params.isEmpty()) "" else callArgs})"
         val returnExpr = fn.returnType.wrapReturnExpr(rawCall, enumNames, dataNames, sealedNames, interfaceNames, abstractNames)
         appendLine("      Task { [weak self] in")
         appendLine("        guard let self else { return }")
@@ -990,7 +1033,7 @@ object SwiftGenerator {
         if (isInstanceBased) {
             appendLine("""    Function("${fn.name}") { ($paramList)$throwsClause in""")
             appendLine("      guard let inst = self.instances[instanceId] else { fatalError(\"Instance not found: \\(instanceId)\") }")
-            val rawCall    = "inst.${fn.name}(${if (fn.params.isEmpty()) "" else callArgs})"
+            val rawCall    = "inst.${fn.name.toSwiftMemberName()}(${if (fn.params.isEmpty()) "" else callArgs})"
             val returnExpr = fn.returnType.wrapReturnExpr(rawCall, enumNames, dataNames, sealedNames, interfaceNames, abstractNames)
             appendLine("      return $returnExpr")
         } else {
@@ -999,7 +1042,7 @@ object SwiftGenerator {
             val rawCall = if (fn.isPropertyGetter)
                 "$callPrefix.${fn.name}"
             else
-                "$callPrefix.${fn.name}(${if (fn.params.isEmpty()) "" else callArgs})"
+                "$callPrefix.${fn.name.toSwiftMemberName()}(${if (fn.params.isEmpty()) "" else callArgs})"
             val returnExpr = fn.returnType.wrapReturnExpr(rawCall, enumNames, dataNames, sealedNames, interfaceNames, abstractNames)
             if (fn.params.isEmpty() && !isFileScope) {
                 appendLine("""    Function("${fn.name}") {""")
@@ -1036,7 +1079,7 @@ object SwiftGenerator {
         if (isInstanceBased) {
             appendLine("      guard let inst = self.instances[instanceId] else { fatalError(\"Instance not found: \\(instanceId)\") }")
             val skieTarget = if (fn.returnType is KmpTypeRef.TypeParam) "skie(inst)" else "inst"
-            val rawCall    = "$skieTarget.${fn.name}(${if (fn.params.isEmpty()) "" else callArgs})"
+            val rawCall    = "$skieTarget.${fn.name.toSwiftMemberName()}(${if (fn.params.isEmpty()) "" else callArgs})"
             val returnExpr = fn.returnType.wrapReturnExpr(rawCall, enumNames, dataNames, sealedNames, interfaceNames, abstractNames)
             appendLine("      Task { [weak self] in")
             appendLine("        guard let self else { return }")
@@ -1051,7 +1094,7 @@ object SwiftGenerator {
             // For file scope, `instance` is the facade type name — class method, no `self.`.
             val callPrefix = if (isFileScope) instance else "self.$instance"
             val callTarget = if (fn.returnType is KmpTypeRef.TypeParam) "skie($callPrefix)" else callPrefix
-            val rawCall    = "$callTarget.${fn.name}(${if (fn.params.isEmpty()) "" else callArgs})"
+            val rawCall    = "$callTarget.${fn.name.toSwiftMemberName()}(${if (fn.params.isEmpty()) "" else callArgs})"
             val returnExpr = fn.returnType.wrapReturnExpr(rawCall, enumNames, dataNames, sealedNames, interfaceNames, abstractNames)
             appendLine("      Task { [weak self] in")
             appendLine("        guard let self else { return }")
@@ -1149,13 +1192,13 @@ object SwiftGenerator {
         return params.all { it.type.isSwiftBridgeable(enumNames, dataNames, sealedNames, interfaceNames, abstractNames) }
     }
 
+    /** Whether any parameter conversion can throw — derived from the emitted conversions. */
     private fun KmpFunction.needsThrows(
         enumNames: Set<String>,
         dataNames: Set<String>,
         sealedNames: Set<String>,
     ): Boolean = params.any { p ->
-        val t = p.type
-        t is KmpTypeRef.ClassRef && (t.simpleName in enumNames || t.simpleName in dataNames || t.simpleName in sealedNames)
+        p.type.toSwiftCallArgWithPrefix(p.name, enumNames, dataNames, sealedNames).first.isNotEmpty()
     }
 
     private fun KmpTypeRef.isSwiftBridgeable(
@@ -1268,6 +1311,8 @@ object SwiftGenerator {
         this is KmpTypeRef.ClassRef && simpleName in abstractNames ->
             "" to if (isNullable) "$paramName.flatMap { ${simpleName}Module._instances[\$0] }"
                    else "${simpleName}Module._instances[$paramName]!"
+        this is KmpTypeRef.CollectionType ->
+            toKmpConversionWithPrefix(paramName, enumNames, dataNames, sealedNames)
         else -> "" to paramName
     }
 
@@ -1364,6 +1409,26 @@ object SwiftGenerator {
             PrimitiveKind.BYTE,
             PrimitiveKind.SHORT   -> "value"
         }
+        // sendEvent needs [String: Any?]-compatible payloads — records become dicts per element.
+        this is KmpTypeRef.CollectionType && kind == CollectionKind.LIST -> {
+            val elem = typeArgs.getOrNull(0)?.typeOrNull()
+            when {
+                elem is KmpTypeRef.ClassRef && (elem.simpleName in dataNames || elem.simpleName in sealedNames) ->
+                    "value.map { toRecord(\$0).__toDict() }"
+                elem is KmpTypeRef.ClassRef && elem.simpleName in enumNames -> "value.map { \$0.name }"
+                else -> "value"
+            }
+        }
+        this is KmpTypeRef.CollectionType && kind == CollectionKind.MAP -> {
+            val v = typeArgs.getOrNull(1)?.typeOrNull()
+            when {
+                v is KmpTypeRef.ClassRef && (v.simpleName in dataNames || v.simpleName in sealedNames) ->
+                    "value.mapValues { toRecord(\$0).__toDict() }"
+                v is KmpTypeRef.ClassRef && v.simpleName in enumNames -> "value.mapValues { \$0.name }"
+                else -> "value"
+            }
+        }
+        this is KmpTypeRef.CollectionType && kind == CollectionKind.SET -> "Array(value)"
         else -> "value"
     }
 
@@ -1448,18 +1513,38 @@ object SwiftGenerator {
             if (isNullable) "$expr?.name" else "$expr.name"
         this is KmpTypeRef.ClassRef && (simpleName in dataNames || simpleName in sealedNames) ->
             if (isNullable) "$expr.map { toRecord(\$0) }" else "toRecord($expr)"
-        // Int in Map values: SKIE boxes to KotlinInt → convert to Int32 for @Field
+        // Element-wise conversion: records → toRecord, enums → .name, boxed numbers unboxed
         this is KmpTypeRef.CollectionType && kind == CollectionKind.MAP -> {
-            val valType = (typeArgs.getOrNull(1) as? KmpTypeArg.Invariant)?.type
-            val valConv = valType?.singleElemToRecordConv()
+            val valType = typeArgs.getOrNull(1)?.typeOrNull()
+            val valConv = valType?.recordElemConv(enumNames, dataNames, sealedNames)
             if (valConv != null)
                 if (isNullable) "$expr?.mapValues { v in $valConv }" else "$expr.mapValues { v in $valConv }"
             else expr
         }
-        this is KmpTypeRef.CollectionType && kind == CollectionKind.SET ->
-            if (isNullable) "$expr.map { Array(\$0) }" else "Array($expr)"
+        this is KmpTypeRef.CollectionType && kind == CollectionKind.LIST -> {
+            val elemConv = typeArgs.getOrNull(0)?.typeOrNull()?.recordElemConv(enumNames, dataNames, sealedNames)
+            if (elemConv != null)
+                if (isNullable) "$expr?.map { v in $elemConv }" else "$expr.map { v in $elemConv }"
+            else expr
+        }
+        this is KmpTypeRef.CollectionType && kind == CollectionKind.SET -> {
+            val elemConv = typeArgs.getOrNull(0)?.typeOrNull()?.recordElemConv(enumNames, dataNames, sealedNames)
+            when {
+                elemConv != null && isNullable -> "$expr?.map { v in $elemConv }"
+                elemConv != null -> "$expr.map { v in $elemConv }"
+                isNullable -> "$expr.map { Array(\$0) }"
+                else -> "Array($expr)"
+            }
+        }
         else -> expr
     }
+
+    /** KMP → Record element conversion for one collection element `v`, or null for identity. */
+    private fun KmpTypeRef.recordElemConv(
+        enumNames: Set<String>,
+        dataNames: Set<String>,
+        sealedNames: Set<String>,
+    ): String? = singleElemBridgeExpr("v", enumNames, dataNames, sealedNames) ?: singleElemToRecordConv()
 
     /** Converts a single SKIE-boxed element to the Expo-friendly @Field type. */
     private fun KmpTypeRef.singleElemToRecordConv(): String? = when {
@@ -1496,17 +1581,48 @@ object SwiftGenerator {
             "try " to if (isNullable) "$fieldName.map { try decode${simpleName}(\$0) }" else "decode${simpleName}($fieldName)"
         this is KmpTypeRef.ClassRef && (simpleName in dataNames || simpleName in sealedNames) ->
             "try " to if (isNullable) "$fieldName?.toKmp()" else "$fieldName.toKmp()"
-        // Int in Map values: Int32 @Field → KotlinInt for KMP
+        // Element-wise decode: Records → toKmp, enum names → decode, primitives boxed for SKIE
         this is KmpTypeRef.CollectionType && kind == CollectionKind.MAP -> {
-            val valType = (typeArgs.getOrNull(1) as? KmpTypeArg.Invariant)?.type
-            val valConv = valType?.singleElemToKmpConv()
+            val valType = typeArgs.getOrNull(1)?.typeOrNull()
+            val (vp, valConv) = valType?.kmpElemConv(enumNames, dataNames, sealedNames) ?: ("" to null)
             if (valConv != null)
-                "" to if (isNullable) "$fieldName?.mapValues { v in $valConv }" else "$fieldName.mapValues { v in $valConv }"
+                vp to if (isNullable) "$fieldName?.mapValues { v in $valConv }" else "$fieldName.mapValues { v in $valConv }"
             else "" to fieldName
         }
-        this is KmpTypeRef.CollectionType && kind == CollectionKind.SET ->
-            "" to if (isNullable) "$fieldName.map { Set(\$0) }" else "Set($fieldName)"
+        this is KmpTypeRef.CollectionType && kind == CollectionKind.LIST -> {
+            val elemType = typeArgs.getOrNull(0)?.typeOrNull()
+            val (ep, elemConv) = elemType?.kmpElemConv(enumNames, dataNames, sealedNames) ?: ("" to null)
+            if (elemConv != null)
+                ep to if (isNullable) "$fieldName?.map { v in $elemConv }" else "$fieldName.map { v in $elemConv }"
+            else "" to fieldName
+        }
+        this is KmpTypeRef.CollectionType && kind == CollectionKind.SET -> {
+            val elemType = typeArgs.getOrNull(0)?.typeOrNull()
+            val (ep, elemConv) = elemType?.kmpElemConv(enumNames, dataNames, sealedNames) ?: ("" to null)
+            when {
+                elemConv != null && isNullable -> ep to "$fieldName.map { Set(try \$0.map { v in $elemConv }) }"
+                elemConv != null -> ep to "Set($fieldName.map { v in $elemConv })"
+                isNullable -> "" to "$fieldName.map { Set(\$0) }"
+                else -> "" to "Set($fieldName)"
+            }
+        }
         else -> "" to fieldName
+    }
+
+    /**
+     * Record-wire → KMP element conversion for one collection element `v`:
+     * `(prefix, expr?)` where prefix is `"try "` when the conversion can throw.
+     */
+    private fun KmpTypeRef.kmpElemConv(
+        enumNames: Set<String>,
+        dataNames: Set<String>,
+        sealedNames: Set<String>,
+    ): Pair<String, String?> = when {
+        this is KmpTypeRef.ClassRef && (simpleName in dataNames || simpleName in sealedNames) ->
+            "try " to "try v.toKmp()"
+        this is KmpTypeRef.ClassRef && simpleName in enumNames ->
+            "try " to "try decode${simpleName}(v)"
+        else -> "" to singleElemToKmpConv()
     }
 
     /**
@@ -1589,11 +1705,25 @@ object SwiftGenerator {
                 "try " to "decode${simpleName}($fieldName ?? \"\")"
             this is KmpTypeRef.ClassRef && (simpleName in dataNames || simpleName in sealedNames) ->
                 "try " to "($fieldName ?? ${simpleName}Record()).toKmp()"
+            this is KmpTypeRef.CollectionType -> {
+                val fallback = if (kind == CollectionKind.MAP) "[:]" else "[]"
+                toKmpConversionWithPrefix("($fieldName ?? $fallback)", enumNames, dataNames, sealedNames)
+            }
             else -> toKmpConversionWithPrefix(fieldName, enumNames, dataNames, sealedNames)
         }
     }
 
     // ── Declaration accessors ─────────────────────────────────────────────────
+
+    /**
+     * Kotlin/Native renames members that collide with NSObject: `toString()` → `description()`,
+     * `copy(...)` → `doCopy(...)`. Applies to dispatch call sites.
+     */
+    private fun String.toSwiftMemberName(): String = when (this) {
+        "toString" -> "description"
+        "copy"     -> "doCopy"
+        else       -> this
+    }
 
     private fun KmpDeclaration.declName(): String = when (this) {
         is KmpDeclaration.KmpClass       -> name

@@ -190,6 +190,9 @@ sealed class KmpDeclaration {
         val variants: List<KmpVariant>,
         val functions: List<KmpFunction>,
         val docComment: String? = null,
+        /** Whether declared as `sealed interface` — Kotlin/Native cannot nest types in an ObjC
+         *  protocol, so nested variants surface in Swift as concatenated names (`ParentChild`). */
+        val isFromInterface: Boolean = false,
     ) : KmpDeclaration()
 
     /**
