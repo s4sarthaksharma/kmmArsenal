@@ -46,6 +46,20 @@ object KlibApiReader {
         """^\s*(?:public\s+)?(?:suspend\s+)?(?:fun|val|var)\s+(\w+)"""
     )
 
+    /** Scope-aware KDoc scan: any class/interface/object with any leading modifiers — used to
+     *  track the enclosing-type stack so member KDoc is keyed `EnclosingType.member`. Broader than
+     *  [DECL_NAME_REGEX] so even non-bridged (e.g. `private`) nested types push a scope and keep
+     *  member keying correct. */
+    private val TYPE_DECL_SCAN_REGEX = Regex(
+        """^\s*(?:(?:public|private|internal|protected|sealed|abstract|open|inner|enum|annotation|data|value|companion|final|expect|actual)\s+)*(?:class|interface|object)\s+(\w+)"""
+    )
+
+    /** Scope-aware KDoc scan: any fun/val/var member (or top-level) with any leading modifiers,
+     *  optionally generic (`fun <T> name`). Captures the declared simple name. */
+    private val MEMBER_DECL_SCAN_REGEX = Regex(
+        """^\s*(?:(?:public|private|internal|protected|override|abstract|open|final|suspend|inline|operator|infix|external|const|lateinit|tailrec|expect|actual)\s+)*(?:fun|val|var)\s+(?:<[^>]+>\s*)?(\w+)"""
+    )
+
     /**
      * One `class`/`interface`/`object` declaration read from klib metadata, paired with the
      * [NameResolverImpl] needed to resolve string/class-id references within it.
@@ -97,6 +111,10 @@ object KlibApiReader {
         val classToFile: Map<String, String> =
             if (sourceDir != null) scanSourceFiles(sourceDir) else emptyMap()
 
+        // KDoc recovered from source (klib metadata carries none), keyed by qualified name.
+        val comments: Map<String, String> =
+            if (sourceDir != null) scanKDocComments(sourceDir) else emptyMap()
+
         // Preserve insertion order so file order matches compilation order.
         val partEntries = LinkedHashMap<String, PartData>()
 
@@ -147,10 +165,13 @@ object KlibApiReader {
             val fileScopeFunctions = mutableListOf<KmpFunction>()
             for (entry in data.topLevel) {
                 entry.functions.mapNotNullTo(fileScopeFunctions) { fn ->
+                    // Top-level function → keyed by its bare name (context here is the part name).
                     readFunction(fn, entry.nr, entry.tt, emptyList(), context = partName, onSkip = onSkip)
+                        ?.let { it.copy(docComment = comments[it.name]) }
                 }
                 entry.properties.mapNotNullTo(fileScopeFunctions) { prop ->
                     readPropertyAsGetter(prop, entry.nr, entry.tt)
+                        ?.let { it.copy(docComment = comments[it.name]) }
                 }
             }
 
@@ -167,7 +188,7 @@ object KlibApiReader {
 
             val declarations = mutableListOf<KmpDeclaration>()
             topLevel.mapNotNullTo(declarations) { entry ->
-                readDeclaration(entry.cls, entry.nr, entry.tt, byFqName, onSkip)
+                readDeclaration(entry.cls, entry.nr, entry.tt, byFqName, comments, onSkip)
             }
             if (fileScopeFunctions.isNotEmpty()) {
                 declarations.add(KmpDeclaration.KmpFileScope(fileName, targetPackage, fileScopeFunctions))
@@ -206,6 +227,153 @@ object KlibApiReader {
         return result
     }
 
+    // ── KDoc scanning ───────────────────────────────────────────────────────────
+
+    /**
+     * Scans all `.kt` files under [sourceDir] and returns a map from a declaration's qualified
+     * key to its cleaned KDoc text. klib protobuf metadata carries no comments, so the doc text
+     * is recovered from source here and threaded onto the model's `docComment` fields.
+     *
+     * Keys mirror the reader's own naming: a top-level type/function/property is keyed by its
+     * bare simple name (`FixtureUser`, `fixtureGreet`); a member function is keyed by its
+     * immediately-enclosing type name (`FixtureRepository.findById`) — matching the `context`
+     * threaded through [readFunctions].
+     *
+     * The scan is a heuristic (brace-depth scope tracking + regex), not a full Kotlin parse: a
+     * miss simply leaves `docComment` null (today's behavior) and a wrong attach only mislabels a
+     * doc-comment — neither can break the generated output's compilation.
+     */
+    private fun scanKDocComments(sourceDir: File): Map<String, String> {
+        val result = mutableMapOf<String, String>()
+        sourceDir.walkTopDown()
+            .filter { it.extension == "kt" }
+            .forEach { scanKDocInFile(it.readLines(), result) }
+        return result
+    }
+
+    /** Scans one file's lines, attaching each buffered `/** … */` block to the declaration that
+     *  follows it (see [scanKDocComments]). Enclosing-type scope is tracked by brace depth. */
+    private fun scanKDocInFile(lines: List<String>, out: MutableMap<String, String>) {
+        // (typeName, brace depth at which the type's body opened) — innermost last.
+        val scope = ArrayDeque<Pair<String, Int>>()
+        var depth = 0
+        var pending: MutableList<String>? = null   // collected inner lines of the last KDoc block
+        var collecting = false                      // mid multi-line /** … */
+
+        for (line in lines) {
+            val trimmed = line.trim()
+
+            if (collecting) {
+                pending?.add(trimmed.substringBefore("*/"))
+                if (trimmed.contains("*/")) collecting = false
+                continue                            // braces inside a comment never count
+            }
+
+            if (trimmed.startsWith("/**")) {
+                val rest = trimmed.removePrefix("/**")
+                if (rest.contains("*/")) {
+                    pending = mutableListOf(rest.substringBefore("*/"))
+                } else {
+                    pending = mutableListOf(rest)
+                    collecting = true
+                }
+                continue
+            }
+
+            val typeName   = TYPE_DECL_SCAN_REGEX.find(line)?.groupValues?.get(1)
+            val memberName = if (typeName == null) MEMBER_DECL_SCAN_REGEX.find(line)?.groupValues?.get(1) else null
+            val isSkippable = trimmed.isEmpty() || trimmed.startsWith("@") || trimmed.startsWith("//")
+
+            when {
+                typeName != null -> {
+                    pending?.let { cleanKdoc(it, isType = true)?.let { doc -> out.putIfAbsent(typeName, doc) } }
+                    pending = null
+                    scope.addLast(typeName to depth)   // push before this line's braces are counted
+                }
+                memberName != null -> {
+                    pending?.let {
+                        val enclosing = scope.lastOrNull()?.first
+                        val key = if (enclosing == null) memberName else "$enclosing.$memberName"
+                        cleanKdoc(it, isType = false)?.let { doc -> out.putIfAbsent(key, doc) }
+                    }
+                    pending = null
+                }
+                !isSkippable -> pending = null         // some other code line — doc attached to nothing
+            }
+
+            val (opens, closes) = countBraces(line)
+            depth += opens - closes
+            while (scope.isNotEmpty() && depth <= scope.last().second) scope.removeLast()
+        }
+    }
+
+    /**
+     * Turns the raw inner lines of a `/** … */` block into cleaned doc text (comment markers and
+     * leading ` * ` bullets stripped), applying the "keep & translate (trimmed)" tag policy:
+     *  - **types** ([isType] true): drop `@param`/`@return`; fold `@property name desc` into a
+     *    prose line `name: desc` (JSDoc has no per-field tag — see the propagation plan).
+     *  - **functions** ([isType] false): keep `@param`/`@return` lines verbatim (Android re-emits
+     *    them as native KDoc; the TS/Swift generators re-parse and translate them); drop `@property`.
+     *  - other KDoc tags (`@throws`, `@see`, `@sample`, `@constructor`, …) are dropped everywhere.
+     *
+     * @return the joined text, or `null` if nothing but stripped tags/whitespace remained.
+     */
+    private fun cleanKdoc(rawLines: List<String>, isType: Boolean): String? {
+        val out = mutableListOf<String>()
+        var tagIdx = -1   // index in `out` of the tag line currently accepting wrapped continuations
+        for (raw in rawLines) {
+            var s = raw.trim().removeSuffix("*/").trimEnd()
+            s = when {
+                s.startsWith("* ") -> s.drop(2)
+                s == "*"           -> ""
+                s.startsWith("*")  -> s.drop(1).trimStart()
+                else               -> s
+            }
+            val t = s.trimStart()
+            when {
+                t.startsWith("@property") -> {
+                    tagIdx = -1
+                    if (isType) {
+                        val body = t.removePrefix("@property").trim()
+                        val nm   = body.substringBefore(' ')
+                        val desc = body.substringAfter(' ', "").trim()
+                        if (nm.isNotEmpty()) out.add(if (desc.isEmpty()) nm else "$nm: $desc")
+                    }
+                }
+                t.startsWith("@param") || t.startsWith("@return") ->
+                    if (!isType) { out.add(t); tagIdx = out.lastIndex } else tagIdx = -1
+                t.startsWith("@") -> tagIdx = -1                    // drop other tags
+                s.isBlank()       -> { out.add(""); tagIdx = -1 }
+                tagIdx >= 0       -> out[tagIdx] = "${out[tagIdx]} $t"   // wrapped tag continuation
+                else              -> out.add(s)
+            }
+        }
+        return out.joinToString("\n").trim().ifBlank { null }
+    }
+
+    /** Counts `{`/`}` on a line, ignoring braces inside string/char literals and line comments so
+     *  brace-depth scope tracking is not thrown off by `"…{…}…"` or `// …`. Triple-quoted strings
+     *  and `${…}` template braces are treated naively — acceptable for the clean source scanned. */
+    private fun countBraces(line: String): Pair<Int, Int> {
+        var opens = 0; var closes = 0
+        var inStr = false; var inChar = false
+        var i = 0
+        while (i < line.length) {
+            val c = line[i]
+            when {
+                inStr  -> if (c == '\\') i++ else if (c == '"') inStr = false
+                inChar -> if (c == '\\') i++ else if (c == '\'') inChar = false
+                c == '"'  -> inStr = true
+                c == '\'' -> inChar = true
+                c == '/' && i + 1 < line.length && line[i + 1] == '/' -> return opens to closes
+                c == '{'  -> opens++
+                c == '}'  -> closes++
+            }
+            i++
+        }
+        return opens to closes
+    }
+
     // ── Declaration reading ───────────────────────────────────────────────────
 
     /**
@@ -222,6 +390,7 @@ object KlibApiReader {
         nr: NameResolverImpl,
         tt: TypeTable,
         all: Map<String, ClassEntry>,
+        comments: Map<String, String> = emptyMap(),
         onSkip: (String) -> Unit = {},
     ): KmpDeclaration? {
         if (Flags.VISIBILITY.get(cls.flags) != ProtoBuf.Visibility.PUBLIC) return null
@@ -233,6 +402,7 @@ object KlibApiReader {
         val kind     = Flags.CLASS_KIND.get(cls.flags)
         val modality = Flags.MODALITY.get(cls.flags)
         val isData   = Flags.IS_DATA.get(cls.flags)
+        val docComment = comments[name]
 
         return when {
             kind == ProtoBuf.Class.Kind.ANNOTATION_CLASS -> null
@@ -241,6 +411,7 @@ object KlibApiReader {
                 name        = name,
                 packageName = pkg,
                 entries     = cls.enumEntryList.map { nr.getString(it.name) },
+                docComment  = docComment,
             )
 
             // SEALED must be checked before INTERFACE: a `sealed interface` is a closed
@@ -260,7 +431,8 @@ object KlibApiReader {
                     name        = name,
                     packageName = pkg,
                     variants    = variants,
-                    functions   = readFunctions(cls, nr, tt, context = name, onSkip = onSkip),
+                    functions   = readFunctions(cls, nr, tt, context = name, comments = comments, onSkip = onSkip),
+                    docComment  = docComment,
                     isFromInterface = kind == ProtoBuf.Class.Kind.INTERFACE,
                 )
             }
@@ -268,7 +440,8 @@ object KlibApiReader {
             kind == ProtoBuf.Class.Kind.INTERFACE -> KmpDeclaration.KmpInterface(
                 name        = name,
                 packageName = pkg,
-                functions   = readFunctions(cls, nr, tt, context = name, onSkip = onSkip),
+                functions   = readFunctions(cls, nr, tt, context = name, comments = comments, onSkip = onSkip),
+                docComment  = docComment,
                 abstractProps = readAbstractProperties(cls, nr, tt),
             )
 
@@ -276,22 +449,25 @@ object KlibApiReader {
             kind == ProtoBuf.Class.Kind.COMPANION_OBJECT -> KmpDeclaration.KmpObject(
                 name        = name,
                 packageName = pkg,
-                functions   = readFunctions(cls, nr, tt, context = name, onSkip = onSkip),
+                functions   = readFunctions(cls, nr, tt, context = name, comments = comments, onSkip = onSkip),
+                docComment  = docComment,
             )
 
             isData -> KmpDeclaration.KmpDataClass(
                 name        = name,
                 packageName = pkg,
                 fields      = primaryConstructorFields(cls, nr, tt),
-                functions   = readFunctions(cls, nr, tt, context = name, onSkip = onSkip),
+                functions   = readFunctions(cls, nr, tt, context = name, comments = comments, onSkip = onSkip),
+                docComment  = docComment,
             )
 
             else -> KmpDeclaration.KmpClass(
                 name           = name,
                 packageName    = pkg,
                 isAbstract     = modality == ProtoBuf.Modality.ABSTRACT,
-                functions      = readFunctions(cls, nr, tt, context = name, onSkip = onSkip),
+                functions      = readFunctions(cls, nr, tt, context = name, comments = comments, onSkip = onSkip),
                 typeParameters = cls.typeParameterList.map { nr.getString(it.name) },
+                docComment     = docComment,
                 ctorFields    = primaryConstructorFields(cls, nr, tt),
                 abstractProps = readAbstractProperties(cls, nr, tt),
             )
@@ -352,11 +528,14 @@ object KlibApiReader {
         nr: NameResolverImpl,
         tt: TypeTable,
         context: String = "",
+        comments: Map<String, String> = emptyMap(),
         onSkip: (String) -> Unit = {},
     ): List<KmpFunction> {
         val isData = Flags.IS_DATA.get(cls.flags)
         return cls.functionList.mapNotNull {
             readFunction(it, nr, tt, cls.typeParameterList, isDataClassMember = isData, context = context, onSkip = onSkip)
+                // Member function → keyed `EnclosingType.member` (context is the class simple name).
+                ?.let { fn -> fn.copy(docComment = comments["$context.${fn.name}"]) }
         }
     }
 

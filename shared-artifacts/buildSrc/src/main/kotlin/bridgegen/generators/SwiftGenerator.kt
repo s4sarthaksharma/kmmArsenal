@@ -189,6 +189,7 @@ object SwiftGenerator {
     ) {
         val n = decl.name
 
+        append(formatComment(decl.docComment, ""))
         appendLine("struct ${n}Record: Record {")
         for (field in decl.fields) {
             val type    = field.type.toRecordFieldType(enumNames, dataNames, sealedNames)
@@ -256,6 +257,7 @@ object SwiftGenerator {
         }
 
         // struct XRecord: Record — flat, type discriminator + all variant fields nullable
+        append(formatComment(decl.docComment, ""))
         appendLine("struct ${n}Record: Record {")
         appendLine("  @Field var type: String = \"\"")
         for (field in allFields) {
@@ -374,6 +376,7 @@ object SwiftGenerator {
             "<${decl.typeParameters.joinToString(", ") { "AnyObject" }}>"
         } else ""
 
+        append(formatComment(decl.docCommentOrNull(), ""))
         appendLine("public class ${name}Module: Module {")
 
         when {
@@ -700,6 +703,7 @@ object SwiftGenerator {
         appendLine()
 
         // ── Module class ─────────────────────────────────────────────────────
+        append(formatComment(decl.docCommentOrNull(), ""))
         appendLine("public class ${name}Module: Module {")
 
         if (hasFlows) {
@@ -1849,23 +1853,15 @@ object SwiftGenerator {
 
 // ── File-level helpers ────────────────────────────────────────────────────────
 
+/**
+ * Renders a `docComment`'s prose as Swift doc-comment (`///`) lines at [indent] — surfaced as
+ * Xcode Quick Help. Per the "trimmed" propagation policy Swift is prose-only: `@param`/`@return`
+ * tags are dropped rather than translated to Swift markup (`- Parameter:` / `- Returns:`).
+ */
 private fun formatComment(docComment: String?, indent: String = "    "): String {
-    if (docComment == null) return ""
-    val lines = docComment.lines().mapNotNull { line ->
-        val content = line.trim()
-            .removePrefix("/**").removePrefix("*/").removePrefix("/*")
-            .let {
-                when {
-                    it.startsWith("* ") -> it.drop(2)
-                    it.startsWith("*")  -> it.drop(1).trimStart()
-                    it.startsWith("// ") -> it.drop(3)
-                    it.startsWith("//")  -> it.drop(2).trimStart()
-                    else -> it
-                }
-            }.trim()
-        if (content.isBlank()) null else "$indent// $content"
-    }
-    return if (lines.isEmpty()) "" else lines.joinToString("\n") + "\n"
+    val prose = parseDoc(docComment).prose
+    if (prose.isEmpty()) return ""
+    return prose.joinToString("\n") { "$indent/// $it".trimEnd() } + "\n"
 }
 
 private fun String.cap()   = replaceFirstChar { it.uppercase() }

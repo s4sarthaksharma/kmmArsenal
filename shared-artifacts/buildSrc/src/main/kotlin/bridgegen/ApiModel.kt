@@ -91,7 +91,7 @@ sealed class KmpDeclaration {
      * @property packageName Fully qualified package (e.g. `"com.myapp.shared.auth"`).
      * @property isAbstract  Whether the Kotlin declaration carries the `abstract` modifier.
      * @property functions   Public functions declared on this class, in source order.
-     * @property docComment  Reserved for KDoc; currently never populated (klib metadata carries no comments).
+     * @property docComment  The declaration's KDoc prose, recovered from source by the reader (klib carries no comments); `null` if undocumented.
      * @property ctorFields  Primary constructor parameters — for an abstract class these are
      *                       threaded through the generated `create(...)` so a JS-implemented
      *                       anonymous subclass can call `super(...)`.
@@ -119,7 +119,7 @@ sealed class KmpDeclaration {
      * @property name        Simple interface name (e.g. `"UserRepository"`).
      * @property packageName Fully qualified package.
      * @property functions   Abstract function signatures declared on this interface.
-     * @property docComment  Reserved for KDoc; currently never populated (klib metadata carries no comments).
+     * @property docComment  The declaration's KDoc prose, recovered from source by the reader (klib carries no comments); `null` if undocumented.
      * @property abstractProps Public abstract properties — a JS-implemented anonymous object
      *                       overrides each with a value passed through the generated `create(...)`.
      */
@@ -140,7 +140,7 @@ sealed class KmpDeclaration {
      * @property name        Simple object name (e.g. `"AnalyticsApi"`).
      * @property packageName Fully qualified package.
      * @property functions   Public functions on this object, in source order.
-     * @property docComment  Reserved for KDoc; currently never populated (klib metadata carries no comments).
+     * @property docComment  The declaration's KDoc prose, recovered from source by the reader (klib carries no comments); `null` if undocumented.
      */
     data class KmpObject(
         val name: String,
@@ -160,7 +160,7 @@ sealed class KmpDeclaration {
      * @property packageName Fully qualified package.
      * @property fields      Constructor parameters in declaration order (the primary constructor).
      * @property functions   Additional public member functions beyond the data class defaults.
-     * @property docComment  Reserved for KDoc; currently never populated (klib metadata carries no comments).
+     * @property docComment  The declaration's KDoc prose, recovered from source by the reader (klib carries no comments); `null` if undocumented.
      */
     data class KmpDataClass(
         val name: String,
@@ -182,7 +182,7 @@ sealed class KmpDeclaration {
      * @property packageName Fully qualified package.
      * @property variants    All direct subtypes, in source order.
      * @property functions   Shared functions declared on the sealed parent (uncommon but valid).
-     * @property docComment  Reserved for KDoc; currently never populated (klib metadata carries no comments).
+     * @property docComment  The declaration's KDoc prose, recovered from source by the reader (klib carries no comments); `null` if undocumented.
      */
     data class KmpSealedClass(
         val name: String,
@@ -205,7 +205,7 @@ sealed class KmpDeclaration {
      * @property name    Simple enum class name (e.g. `"Direction"`, `"Status"`).
      * @property packageName Fully qualified package.
      * @property entries Enum case names in declaration order (e.g. `["NORTH", "SOUTH", "EAST", "WEST"]`).
-     * @property docComment Reserved for KDoc; currently never populated (klib metadata carries no comments).
+     * @property docComment The declaration's KDoc prose, recovered from source by the reader (klib carries no comments); `null` if undocumented.
      */
     data class KmpEnum(
         val name: String,
@@ -382,8 +382,9 @@ data class KmpParam(
  * @property returnType The fully resolved return type. For [FunctionKind.FLOW] functions this is
  *                      the *element* type — the `Flow<…>` wrapper is stripped during normalization
  *                      so generators work with the concrete element type directly.
- * @property docComment Reserved for the declaration's KDoc. Currently always `null` —
- *                      klib metadata carries no comments and the reader does not scan source.
+ * @property docComment The function's KDoc — prose plus inline `@param`/`@return` lines —
+ *                      recovered from source by the reader (klib carries no comments); `null` if
+ *                      undocumented. Generators split it via [parseDoc].
  */
 data class KmpFunction(
     val name: String,
@@ -506,6 +507,53 @@ sealed class KmpTypeRef {
 }
 
 // ─── Type arguments ───────────────────────────────────────────────────────────
+
+// ─── Doc comments ───────────────────────────────────────────────────────────────
+
+/**
+ * A `docComment` split into its prose body and (for functions) `@param`/`@return` tag lines.
+ *
+ * `KlibApiReader` recovers doc text from source (klib metadata carries no comments) and stores it
+ * on the model's `docComment` fields — prose only for declarations (`@property` folded in), prose
+ * plus inline `@param`/`@return` lines for functions. Generators call [parseDoc] to re-emit those
+ * tags in each language's native form: JSDoc `@param`/`@returns` in TypeScript (name-filtered),
+ * verbatim KDoc on Android, prose-only `///` on Swift.
+ */
+data class ParsedDoc(
+    val prose: List<String>,
+    val params: List<Pair<String, String>>,
+    val returns: String?,
+) {
+    val isEmpty: Boolean get() = prose.isEmpty() && params.isEmpty() && returns == null
+}
+
+/**
+ * Splits a stored `docComment` into prose + `@param`/`@return` tags. The reader stores each tag on
+ * a single line (wrapped continuations are joined during the scan), so every non-tag line here is
+ * genuine prose.
+ */
+fun parseDoc(docComment: String?): ParsedDoc {
+    if (docComment == null) return ParsedDoc(emptyList(), emptyList(), null)
+    val prose = mutableListOf<String>()
+    val params = mutableListOf<Pair<String, String>>()
+    var returns: String? = null
+    for (line in docComment.lines()) {
+        val t = line.trim()
+        when {
+            t.startsWith("@param") -> {
+                val body = t.removePrefix("@param").trim()
+                val nm   = body.substringBefore(' ')
+                val desc = body.substringAfter(' ', "").trim()
+                if (nm.isNotEmpty()) params.add(nm to desc)
+            }
+            t.startsWith("@return") -> returns = t.removePrefix("@returns").removePrefix("@return").trim()
+            else -> prose.add(line)
+        }
+    }
+    while (prose.isNotEmpty() && prose.first().isBlank()) prose.removeAt(0)
+    while (prose.isNotEmpty() && prose.last().isBlank()) prose.removeAt(prose.size - 1)
+    return ParsedDoc(prose, params, returns)
+}
 
 /**
  * A single type argument in a generic type application (e.g. the `String` in `List<String>`).
@@ -630,6 +678,17 @@ fun KmpFunction.usesNonStringKeyMap(): Boolean {
  */
 fun KmpProperty.isBridgeableAsCreateArg(): Boolean =
     type !is KmpTypeRef.FlowType && type !is KmpTypeRef.TypeParam
+
+/** This declaration's KDoc, or `null` for kinds that carry none (file scopes). */
+fun KmpDeclaration.docCommentOrNull(): String? = when (this) {
+    is KmpDeclaration.KmpClass       -> docComment
+    is KmpDeclaration.KmpInterface   -> docComment
+    is KmpDeclaration.KmpObject      -> docComment
+    is KmpDeclaration.KmpDataClass   -> docComment
+    is KmpDeclaration.KmpSealedClass -> docComment
+    is KmpDeclaration.KmpEnum        -> docComment
+    is KmpDeclaration.KmpFileScope   -> null
+}
 
 /** This declaration's public abstract properties (empty for non-interface/non-class kinds). */
 fun KmpDeclaration.abstractProperties(): List<KmpProperty> = when (this) {

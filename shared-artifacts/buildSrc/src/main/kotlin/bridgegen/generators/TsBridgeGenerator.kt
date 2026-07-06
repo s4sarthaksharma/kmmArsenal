@@ -90,6 +90,7 @@ object TsBridgeGenerator {
             // 1. Enums
             for (e in enums) {
                 appendLine()
+                append(jsdoc(e.docComment))
                 appendLine("export enum ${e.name} {")
                 for (entry in e.entries) appendLine("  $entry = \"$entry\",")
                 appendLine("}")
@@ -98,6 +99,7 @@ object TsBridgeGenerator {
             // 2. Data class types
             for (d in datas) {
                 appendLine()
+                append(jsdoc(d.docComment))
                 appendLine("export type ${d.name} = {")
                 for (field in d.fields) {
                     appendLine("  ${field.name}: ${field.type.toTsType(enumNames, dataNames, sealedNames, interfaceNames, abstractNames)}")
@@ -108,6 +110,7 @@ object TsBridgeGenerator {
             // 3. Sealed class discriminated unions
             for (s in sealeds) {
                 appendLine()
+                append(jsdoc(s.docComment))
                 appendLine("export type ${s.name} =")
                 for (variant in s.variants) {
                     val fields = when (variant) {
@@ -140,6 +143,8 @@ object TsBridgeGenerator {
                     else -> continue
                 }
                 appendLine()
+                append(jsdoc((decl as? KmpDeclaration.KmpInterface)?.docComment
+                    ?: (decl as? KmpDeclaration.KmpClass)?.docComment))
                 appendLine("export interface $declName {}")
             }
 
@@ -177,6 +182,7 @@ object TsBridgeGenerator {
                 val tpUse  = if (tps.isEmpty()) "" else "<${tps.joinToString(", ")}>"
                 val flowFns = cls.functions.subscribableFlows(instanceBased = true)
                 appendLine()
+                append(jsdoc(cls.docComment))
                 appendLine("export class ${cls.name}$tpDecl {")
                 appendLine("  /** @internal */ readonly _handle: string")
                 for (f in flowFns) {
@@ -216,6 +222,8 @@ object TsBridgeGenerator {
                 }
                 val flowFns = fns.subscribableFlows(instanceBased = true)
                 appendLine()
+                append(jsdoc((decl as? KmpDeclaration.KmpInterface)?.docComment
+                    ?: (decl as? KmpDeclaration.KmpClass)?.docComment))
                 appendLine("export class $declName {")
                 appendLine("  /** @internal */ readonly _handle: string")
                 for (f in flowFns) {
@@ -296,6 +304,7 @@ object TsBridgeGenerator {
                 for (f in obj.functions.subscribableFlows(instanceBased = false)) {
                     appendLine("const _${obj.name}_${f.flowBaseName}State = { active: false, count: 0 };")
                 }
+                append(jsdoc(obj.docComment))
                 appendLine("export const ${obj.name} = {")
                 for (fn in obj.functions) {
                     appendWrapperFunction(fn, obj.name, enumNames, dataNames, sealedNames, interfaceNames, abstractNames, onSkip)
@@ -370,6 +379,7 @@ object TsBridgeGenerator {
                     retRef!!.nullable -> "{ const _i = $nativeCall; return _i !== null ? ${retRef.simpleName}._wrap(_i) : null }"
                     else -> "${retRef.simpleName}._wrap($nativeCall)"
                 }
+                append(jsdoc(fn.docComment, "  ", fn.params.map { it.name }))
                 appendLine("  ${fn.name}: ($params): $ret => $callExpr,")
             }
             FunctionKind.SUSPEND -> {
@@ -394,6 +404,7 @@ object TsBridgeGenerator {
                     retRef!!.nullable -> "$nativeCall.then((id: string | null) => id !== null ? ${retRef.simpleName}._wrap(id) : null)"
                     else -> "$nativeCall.then((id: string) => ${retRef.simpleName}._wrap(id))"
                 }
+                append(jsdoc(fn.docComment, "  ", fn.params.map { it.name }))
                 appendLine("  ${fn.name}: ($params): Promise<$ret> => $callExpr,")
             }
             FunctionKind.FLOW -> {
@@ -417,6 +428,7 @@ object TsBridgeGenerator {
                 // (error/complete) marks the stream dead so the next subscribe restarts it.
                 val st = "_${moduleName}_${base}State"
                 val paramsPrefix = if (params.isEmpty()) "" else "$params, "
+                append(jsdoc(fn.docComment, "  ", fn.params.map { it.name }))
                 appendLine("  subscribe$cap: (${paramsPrefix}handlers: { next: (value: $valueType) => void; error?: (message: string) => void; complete?: () => void }): { remove: () => void } => {")
                 appendLine("    const subs = [")
                 appendLine("      $native.addListener('on${cap}Update', (e: any) => handlers.next(e.value)),")
@@ -483,6 +495,7 @@ object TsBridgeGenerator {
                 val nativeCall = "$native.${fn.name}($args)"
                 val retRef = fn.returnType as? KmpTypeRef.ClassRef
                 val isIfaceReturn = retRef != null && (retRef.simpleName in interfaceNames || retRef.simpleName in abstractNames)
+                append(jsdoc(fn.docComment, "  ", fn.params.map { it.name }))
                 when {
                     !isIfaceReturn -> appendLine("  ${fn.name}($params): $ret { return $nativeCall }")
                     retRef!!.nullable -> appendLine("  ${fn.name}($params): $ret { const _i = $nativeCall; return _i !== null ? ${retRef.simpleName}._wrap(_i) : null }")
@@ -506,6 +519,7 @@ object TsBridgeGenerator {
                 val nativeCall = "$native.${fn.name}($args)"
                 val retRef = fn.returnType as? KmpTypeRef.ClassRef
                 val isIfaceReturn = retRef != null && (retRef.simpleName in interfaceNames || retRef.simpleName in abstractNames)
+                append(jsdoc(fn.docComment, "  ", fn.params.map { it.name }))
                 when {
                     !isIfaceReturn -> appendLine("  ${fn.name}($params): Promise<$ret> { return $nativeCall }")
                     retRef!!.nullable -> appendLine("  ${fn.name}($params): Promise<$ret> { return $nativeCall.then((id: string | null) => id !== null ? ${retRef.simpleName}._wrap(id) : null) }")
@@ -533,6 +547,7 @@ object TsBridgeGenerator {
                 // last remove() stops it. Terminal events mark the stream dead for restart.
                 val paramsPrefix = if (params.isEmpty()) "" else "$params, "
                 appendLine()
+                append(jsdoc(fn.docComment, "  ", fn.params.map { it.name }))
                 appendLine("  subscribe$cap(${paramsPrefix}handlers: { next: (value: $valueType) => void; error?: (message: string) => void; complete?: () => void }): { remove: () => void } {")
                 appendLine("    const st = this._${base}State")
                 appendLine("    const subs = [")
@@ -650,6 +665,34 @@ object TsBridgeGenerator {
             is KmpTypeRef.TypeParam      -> nullable
         }
         return if (nullable) "$base | null" else base
+    }
+}
+
+/**
+ * Renders a `docComment` as a JSDoc block comment at [indent], or `""` when there is nothing to
+ * emit. Prose becomes the description; `@param`/`@return` are translated to JSDoc `@param name`
+ * / `@returns`. When [paramNames] is non-null, `@param` tags are filtered to names that still
+ * appear in the generated signature — so a Kotlin param dropped/renamed in the bridge never leaves
+ * a dangling `@param`. Pass `null` for declaration-level docs (no params to filter against).
+ */
+private fun jsdoc(doc: String?, indent: String = "", paramNames: Collection<String>? = null): String {
+    val parsed = parseDoc(doc)
+    if (parsed.isEmpty) return ""
+    val names = paramNames?.toSet()
+    val tags = buildList {
+        for ((n, d) in parsed.params) {
+            if (names == null || n in names) add(if (d.isEmpty()) "@param $n" else "@param $n $d")
+        }
+        parsed.returns?.takeIf { it.isNotEmpty() }?.let { add("@returns $it") }
+    }
+    val body = parsed.prose.toMutableList()
+    if (body.isNotEmpty() && tags.isNotEmpty()) body.add("")
+    body.addAll(tags)
+    if (body.isEmpty()) return ""
+    return buildString {
+        appendLine("$indent/**")
+        for (line in body) appendLine(if (line.isBlank()) "$indent *" else "$indent * $line")
+        appendLine("$indent */")
     }
 }
 

@@ -27,6 +27,12 @@ class Calculator {
      * Builds a human-readable description from a label and a count.
      * Declared across multiple lines on purpose to exercise the parser's
      * multi-line signature accumulation.
+     *
+     * @param label the text prefix to prepend
+     * @param count the value rendered after the label
+     * @param stale intentionally names no real parameter — exercises the JSDoc name-filter, which
+     *              must drop it from the TS output (but Android re-emits KDoc verbatim)
+     * @return the formatted "label: count" string
      */
     fun describe(
         label: String,

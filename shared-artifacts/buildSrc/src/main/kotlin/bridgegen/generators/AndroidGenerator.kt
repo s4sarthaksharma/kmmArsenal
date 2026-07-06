@@ -172,6 +172,7 @@ object AndroidGenerator {
         val sb = StringBuilder()
 
         // Record class — JS → Kotlin via Expo
+        sb.append(kdoc(decl.docComment, ""))
         sb.appendLine("class ${decl.name}Record : Record {")
         for (field in decl.fields) {
             val fieldType = field.type.toRecordFieldType(enumNames, dataClassNames, sealedNames)
@@ -249,6 +250,7 @@ object AndroidGenerator {
         val n = decl.name
 
         // Flat Record — all variant fields as nullable
+        sb.append(kdoc(decl.docComment, ""))
         sb.appendLine("class ${n}Record : Record {")
         sb.appendLine("    @Field var type: String = \"\"")
         for (field in allFields) {
@@ -404,6 +406,7 @@ object AndroidGenerator {
         val useHolder = isInstanceBased && (hasSuspend || hasFlows)
 
         val sb = StringBuilder()
+        sb.append(kdoc(decl.docCommentOrNull(), ""))
         sb.appendLine("class ${name}Module : Module() {")
         if (useHolder) {
             if (hasFlows) {
@@ -600,6 +603,7 @@ object AndroidGenerator {
         sb.appendLine("}")
         sb.appendLine()
 
+        sb.append(kdoc(decl.docCommentOrNull(), ""))
         sb.appendLine("class ${name}Module : Module() {")
         if (hasSuspend) {
             sb.appendLine()
@@ -787,6 +791,7 @@ object AndroidGenerator {
             return "    // $msg\n"
         }
         val sb  = StringBuilder()
+        sb.append(kdoc(fn.docComment, "    "))
         val ret = fn.returnType.toReturnSuffix(enumNames, dataClassNames, sealedNames, interfaceNames, abstractNames)
         val instanceExpr = when {
             registryName != null -> "$registryName.get(instanceId).instance"
@@ -853,6 +858,7 @@ object AndroidGenerator {
             return "    // $msg\n"
         }
         val sb       = StringBuilder()
+        sb.append(kdoc(fn.docComment, "    "))
         val errorTag = "${fn.name.toSnakeUpperCase()}_ERROR"
         val ret      = fn.returnType.toReturnSuffix(enumNames, dataClassNames, sealedNames, interfaceNames, abstractNames)
         val ownParams = fn.params.map { "${it.name}: ${it.type.toBridgeParamType(enumNames, interfaceNames, abstractNames, dataClassNames, sealedNames)}" }
@@ -942,6 +948,7 @@ object AndroidGenerator {
             return "    // $msg\n"
         }
         val sb        = StringBuilder()
+        sb.append(kdoc(fn.docComment, "    "))
         val base      = fn.flowBaseName
         val Cap       = base.cap()
         val eventName     = "on${Cap}Update"
@@ -1685,6 +1692,20 @@ object AndroidGenerator {
 }
 
 // ── File-level helpers ────────────────────────────────────────────────────────
+
+/**
+ * Renders a `docComment` as a KDoc block comment at [indent], or `""` when blank. The
+ * generated Android code is Kotlin, so the stored text — prose plus any `@param`/`@return` lines —
+ * is emitted verbatim as native KDoc (no translation needed).
+ */
+private fun kdoc(comment: String?, indent: String): String {
+    if (comment.isNullOrBlank()) return ""
+    return buildString {
+        appendLine("$indent/**")
+        for (line in comment.lines()) appendLine(if (line.isBlank()) "$indent *" else "$indent * $line")
+        appendLine("$indent */")
+    }
+}
 
 /** Uppercases the first character, e.g. for turning a lowerCamelCase name into a type name. */
 private fun String.cap()  = replaceFirstChar { it.uppercase() }
